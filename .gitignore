@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Dados: grandes demais para o git e reproduzíveis pelos scripts.
+# Os vídeos vêm dos pacotes originais (ex.: incluir_tecnologia.tar.gz) via
+# preparacao/<fonte>_pre_tratamento.py; os landmarks, do 1_extrair.py.
+# ---------------------------------------------------------------------------
+dados/*
+# ...mas os manifestos SÃO versionados (pequenos): registram qual vídeo está em
+# qual classe e permitem ver no diff quando uma regra de rótulo muda.
+!dados/manifestos/
+
+# Pacotes originais das bases (centenas de MB; o GitHub recusa arquivos > 100 MB)
+*.tar.gz
+*.tgz
+*.zip
+
+# Vídeos soltos em qualquer lugar
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# Modelos do MediaPipe: baixados automaticamente por comum.baixar_modelos()
+modelos_mediapipe/
+*.task
+
+# Modelos treinados e caches de numpy (gerados pelo 2_treinar.py / 1_extrair.py)
+*.pt
+*.pth
+*.npz
+*.npy
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------------------------------------------------------------------------
+# Editores e sistema
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.claude/settings.local.json
+Thumbs.db
+desktop.ini
+.DS_Store
