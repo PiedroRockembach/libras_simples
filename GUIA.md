@@ -123,9 +123,13 @@ fica congelado e você treina só um modelo pequeno em cima da saída dele.
 API Tasks (`HandLandmarker` + `PoseLandmarker`) com arquivos `.task`, que são
 baixados automaticamente. Ela foi testada no mediapipe 1.2.3.
 
-**Quanto custa.** Na CPU, o MediaPipe processa ~13 frames/s. Os ~124 mil frames do
-dataset levam de 2,5 a 3 horas. Por isso o `1_extrair.py` salva os landmarks em
-cache: a etapa cara roda uma vez só, e mudanças nas features só exigem re-treinar.
+**Quanto custa.** O MediaPipe roda na CPU (no Windows ele não usa a GPU) e processa
+~13 frames/s por processo: os ~124 mil frames levariam de 2,5 a 3 horas num processo
+só. Mas um vídeo não depende do outro, um problema "embaraçosamente paralelo": o
+`1_extrair.py` processa vários vídeos ao mesmo tempo, um por **processo**. Em Python,
+threads disputam o GIL e não rodam de fato em paralelo; processos rodam. Com 16
+processos num i9-14900HX, a extração inteira levou **9 minutos**. E ela roda uma vez
+só: os landmarks ficam em cache, e mudanças nas features só exigem re-treinar.
 
 **Taxa de detecção.** O script imprime em quantos frames encontrou mão. Nesses
 vídeos ela varia de ~20% a ~80%, e isso é normal: no início e no fim a pessoa está
@@ -239,6 +243,22 @@ tela). Também mostra se o modelo está "perto" ou perdido.
 **Balanceamento:** cada classe aparece o mesmo número de vezes por época, senão
 a classe com mais vídeos domina.
 
+**Onde está o gargalo do treino (e por que a GPU não é tudo).** Cada passo de
+treino tem duas partes: *preparar o lote* (augmentation + features, em Python na
+CPU) e *calcular a rede* (na GPU). Este modelo é pequeno (490 mil parâmetros) e,
+medido numa RTX 4080, o passo leva os mesmos ~11 ms com lote de 32 ou de 256: a
+GPU passa quase todo o tempo esperando. Quem manda é a CPU. Por isso:
+- **`--workers`**: vários processos preparam os próximos lotes enquanto a GPU treina
+  o atual (um pipeline). Cada processo recebe uma cópia do dataset e precisa da
+  própria semente aleatória, senão todos sorteariam as mesmas augmentations.
+- **`--lote` maior** aproveita a GPU ociosa: menos passos por época com o mesmo
+  custo por passo. Lotes maiores mudam um pouco a dinâmica do treino (menos
+  atualizações por época), então compare a acurácia antes de adotar.
+- Uma placa mais potente quase não muda o tempo; mais núcleos de CPU, sim.
+
+Na prática (i9-14900HX + RTX 4080 Laptop): uma época leva ~85 s na CPU e **~5–9 s**
+na GPU com 8–12 workers.
+
 **Matriz de confusão:** mostra *quais* sinais se confundem. Normalmente são pares
 com a mesma configuração de mão e movimento parecido, e esses pedem mais exemplos.
 Com 1069 classes, a matriz inteira é ilegível: o útil é listar os pares mais
@@ -295,6 +315,8 @@ cobre essa diferença.
 
 ```bash
 pip install -r requirements.txt
+# com GPU NVIDIA no Windows, troque o torch só-CPU pela versão CUDA (veja requirements.txt):
+pip install torch --index-url https://download.pytorch.org/whl/cu132
 # uma vez por base: leva a base para dados/videos/ (sem --executar, só mostra o plano)
 python preparacao/incluir_tecnologia_pre_tratamento.py --origem incluir_tecnologia.tar.gz --executar
 python 1_extrair.py --videos dados/videos --saida dados/landmarks

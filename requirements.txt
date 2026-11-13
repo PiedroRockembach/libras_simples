@@ -1,4 +1,9 @@
 mediapipe>=0.10.30
 opencv-python
 numpy
+# O `pip install torch` padrão no Windows instala a versão SÓ-CPU (o treino ignora a GPU).
+# Com placa NVIDIA, instale a versão CUDA compatível com o driver (veja "CUDA Version"
+# no `nvidia-smi`). Testado com driver 610 / CUDA 13.3:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu132
+# Confira:  python -c "import torch; print(torch.cuda.is_available())"
 torch

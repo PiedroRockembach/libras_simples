@@ -107,7 +107,8 @@ classe:
    a probabilidade se espalha entre muitas classes e raramente passa de 0.7.
 3. **Generalizar para outra pessoa** (quem está na câmera) é o maior risco: o modelo só viu
    um sinalizante por sinal.
-4. O custo de treino cresce: veja o bug de amostras por classe em "Estado / avisos".
+4. O custo de treino cresce com o nº de classes: `repeticoes` (32) amostras por classe por época
+   = ~34 mil amostras/época. Na GPU, ~5–9 s por época (ver "Desempenho medido").
 
 ### Caminhos a avaliar (discutir com o usuário antes de implementar)
 - **Baseline sem treino: k-NN com DTW** sobre as features. Funciona com 1 exemplo por
@@ -125,23 +126,40 @@ classe:
 - Adicionar uma classe `_nada` (pessoa parada ou gesticulando sem sinalizar).
 
 ## Estado / avisos
-- Validado com dados reais (amostra de 10 vídeos de `incluir_tecnologia`, 2026-11-13):
-  - `1_extrair.py`: MediaPipe real funciona; pose em 100% dos frames, mãos em 21–82% (a parte
-    sem mãos é a pessoa parada no início e no fim, removida por `recortar_sem_maos`).
-    ~13 frames/s em CPU: a base inteira (~124 mil frames) leva ~2,5–3 h; vale paralelizar.
-  - `2_treinar.py`: roda de ponta a ponta com landmarks reais.
+- Validado com dados reais (2026-11-13):
+  - `1_extrair.py`: **extração completa feita** (1187 vídeos, 0 erros, `dados/landmarks/`, 64 MB).
+    Pose em 100% dos frames, mãos em ~20–80% (a parte sem mãos é a pessoa parada no início e no
+    fim, removida por `recortar_sem_maos`). 13 vídeos ficaram com mão em menos de 30% dos frames.
+  - `2_treinar.py`: roda de ponta a ponta na GPU com os dados reais; o treino chega a ~99% de
+    acurácia de treino em 5 épocas (decora, como esperado com ~1 vídeo por classe).
   - `3_tempo_real.py`: o loop foi testado com um vídeo no lugar da webcam (prevê a classe certa);
     **webcam real ainda não testada**. ~13–14 fps em 1080p: capturar a câmera em 640×480.
-  - A extração completa ainda não foi rodada.
+- **GPU**: o venv usa `torch 2.15.0+cu132` (o `pip install torch` padrão no Windows é só-CPU;
+  ver `requirements.txt`). `2_treinar.py` escolhe `cuda` sozinho (`--dispositivo`), usa
+  `--workers` processos no DataLoader (padrão `min(8, núcleos-1)`) e salva os pesos na CPU,
+  então o checkpoint abre em máquinas sem GPU (`3_tempo_real.py` carrega com `map_location="cpu"`).
 - **Bugs conhecidos no `2_treinar.py` (ainda não corrigidos):**
   - Checkpoint só é salvo com `acc_val > melhor` (estrito). Com validação pequena a acurácia
-    satura em 100% nas primeiras épocas e o arquivo salvo fica sendo esse modelo quase sem treino
+    satura nas primeiras épocas e o arquivo salvo fica sendo esse modelo quase sem treino
     (confiança ~25% na câmera). Escolher o checkpoint pela perda de validação.
-  - `DatasetSinais` usa `alvo = max(vídeos por classe) × repeticoes`: como uma classe tem 4
-    vídeos, TODA classe vira 128 amostras (~137 mil por época, não ~38 mil).
   - A matriz de confusão final seria impressa com 1069×1069: trocar por top-1/top-5 e pares mais
     confundidos.
-  - Divisão de validação: ver item 1 do problema em aberto.
+  - Divisão de validação: hoje só 13 vídeos (ver item 1 do problema em aberto).
+- Corrigido: `DatasetSinais` usava `alvo = max(vídeos por classe) × repeticoes` (uma classe com
+  4 vídeos fazia TODAS terem 128 amostras: ~137 mil/época). Agora `alvo = max(repeticoes,
+  max vídeos)`: ~34 mil/época.
+
+### Desempenho medido (i9-14900HX + RTX 4080 Laptop 12 GB, 2026-11-13)
+| Etapa | Antes | Agora |
+|---|---|---|
+| Extração (`1_extrair.py`, 16 processos) | ~2,5–3 h estimado (1 processo, ~13 frames/s) | **9,3 min** (~196 frames/s) |
+| Época de treino, CPU, 1 processo | ~340 s (com o bug de amostras) | 85 s |
+| Época de treino, GPU, `--workers 8–12` | — | **~5–9 s** (`--lote 128`: ~4,5 s) |
+| 150 épocas | ~14 h | **~13–20 min** (~11 min com `--lote 128`) |
+- O gargalo NÃO é a GPU: o passo leva ~11 ms com lote 32 ou 256 (custo fixo de disparar
+  operações; VRAM pico ~150 MB). O que pesa é a CPU: preparar os dados (~0,8 ms/amostra em
+  Python) e despachar as operações. Trocar de placa muda pouco; mais núcleos e lote maior, sim.
+- A 1ª época é mais lenta (~20 s): no Windows os processos do DataLoader são criados do zero.
 - Câmera: remover o sufixo `(n)` das variantes só na exibição ("feliz (2)" → "feliz").
 - Em Libras, expressões faciais são gramaticais e ainda não estão nas features
   (próximo passo possível: subconjunto do `FaceLandmarker`).

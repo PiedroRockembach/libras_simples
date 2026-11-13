@@ -43,7 +43,9 @@ def main():
                     help="predições seguidas iguais exigidas")
     args = ap.parse_args()
 
-    ck = torch.load(args.modelo)
+    # map_location="cpu": a inferência de 1 janela por vez é leve e roda bem na CPU;
+    # também garante que um modelo treinado na GPU abra numa máquina sem GPU.
+    ck = torch.load(args.modelo, map_location="cpu")
     classes = ck["classes"]
     modelo = ModeloSinais(ck["n_features"], len(classes))
     modelo.load_state_dict(ck["estado"])

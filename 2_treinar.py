@@ -11,6 +11,7 @@ treinadas normalmente mas nunca são exibidas como resultado na câmera.
 import argparse
 import os
 import random
+import time
 
 import numpy as np
 import torch
@@ -120,13 +121,16 @@ class DatasetSinais(Dataset):
         self.amostras = amostras
         self.aug = aumentar_dados
         self.rng = random.Random(seed)
-        # Balanceamento: cada classe aparece o mesmo número de vezes por época,
-        # senão a classe com mais vídeos domina o treino.
+        # Balanceamento: cada classe aparece o mesmo número de vezes por época
+        # (`repeticoes`), ciclando pelos vídeos dela; senão a classe com mais vídeos
+        # domina o treino. Antes o alvo era max(vídeos por classe) × repeticoes: uma
+        # única classe com 4 vídeos fazia TODAS as 1069 terem 128 amostras (4x o custo).
         if aumentar_dados:
             por_classe = {}
             for i in indices:
                 por_classe.setdefault(amostras[i][3], []).append(i)
-            alvo = max(len(v) for v in por_classe.values()) * repeticoes
+            # max(): garante que todo vídeo aparece pelo menos uma vez por época
+            alvo = max(repeticoes, max(len(v) for v in por_classe.values()))
             self.indices = [v[k % len(v)] for v in por_classe.values() for k in range(alvo)]
         else:
             self.indices = list(indices)
@@ -142,15 +146,26 @@ class DatasetSinais(Dataset):
         return torch.from_numpy(x), rotulo
 
 
+def semear_worker(_):
+    """
+    Cada processo do DataLoader recebe uma CÓPIA do dataset, inclusive do
+    `self.rng`. Sem re-semear, todos os processos sorteariam exatamente as mesmas
+    augmentations (e, sem persistent_workers, repetiriam as mesmas a cada época).
+    torch.initial_seed() já é diferente por processo e por época.
+    """
+    info = torch.utils.data.get_worker_info()
+    info.dataset.rng = random.Random(torch.initial_seed() % 2**32)
+
+
 # ----------------------------------------------------------------------------
 # Treino
 # ----------------------------------------------------------------------------
-def avaliar(modelo, loader, n_classes):
+def avaliar(modelo, loader, n_classes, device="cpu"):
     modelo.eval()
     conf = np.zeros((n_classes, n_classes), int)
     with torch.no_grad():
         for x, y in loader:
-            p = modelo(x).argmax(1)
+            p = modelo(x.to(device)).argmax(1).cpu()
             for a, b in zip(y.numpy(), p.numpy()):
                 conf[a, b] += 1
     return conf.trace() / max(conf.sum(), 1), conf
@@ -165,8 +180,22 @@ def main():
     ap.add_argument("--repeticoes", type=int, default=32,
                     help="cópias aumentadas de cada vídeo por época")
     ap.add_argument("--paciencia", type=int, default=30)
+    ap.add_argument("--lote", type=int, default=32, help="tamanho do lote (batch)")
+    ap.add_argument("--workers", type=int, default=min(8, max(0, (os.cpu_count() or 1) - 1)),
+                    help="processos preparando dados em paralelo (0 = no processo principal)")
+    ap.add_argument("--dispositivo", default="auto", help="auto, cuda ou cpu")
     args = ap.parse_args()
     torch.manual_seed(0); np.random.seed(0); random.seed(0)
+
+    # GPU se houver. Com este modelo pequeno, a GPU calcula um lote em poucos ms;
+    # o gargalo passa a ser preparar os dados (augmentation + features, em Python
+    # na CPU). Por isso os `workers`: vários processos preparam lotes em paralelo
+    # enquanto a GPU treina.
+    device = torch.device("cuda" if args.dispositivo == "auto" and torch.cuda.is_available()
+                          else "cpu" if args.dispositivo == "auto" else args.dispositivo)
+    print(f"Dispositivo: {device}"
+          + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else "")
+          + f" | workers: {args.workers}")
 
     classes, amostras = carregar(args.landmarks)
     print(f"{len(classes)} classes, {len(amostras)} vídeos: {classes}")
@@ -175,11 +204,21 @@ def main():
         print("[aviso] nenhuma classe tem 2+ vídeos: sem validação. A acurácia de "
               "treino NÃO diz se o modelo generaliza. Grave mais vídeos por classe.")
 
+    # persistent_workers: os processos sobrevivem entre épocas (no Windows, criar
+    # processo é caro e cada um recebe uma cópia dos dados). pin_memory: a cópia
+    # CPU -> GPU fica mais rápida e pode ocorrer em paralelo (non_blocking).
+    extra = dict(num_workers=args.workers, persistent_workers=args.workers > 0,
+                 pin_memory=device.type == "cuda",
+                 worker_init_fn=semear_worker if args.workers > 0 else None)
     dl_treino = DataLoader(DatasetSinais(amostras, treino, True, args.repeticoes),
-                           batch_size=32, shuffle=True)
-    dl_val = DataLoader(DatasetSinais(amostras, val, False), batch_size=64) if val else None
+                           batch_size=args.lote, shuffle=True, **extra)
+    dl_val = DataLoader(DatasetSinais(amostras, val, False), batch_size=256,
+                        **{**extra, "num_workers": min(args.workers, 2),
+                           "persistent_workers": args.workers > 0}) if val else None
+    print(f"{len(dl_treino.dataset)} amostras de treino por época "
+          f"({len(dl_treino)} lotes de {args.lote})")
 
-    modelo = ModeloSinais(N_FEATURES, len(classes))
+    modelo = ModeloSinais(N_FEATURES, len(classes)).to(device)
     otim = torch.optim.AdamW(modelo.parameters(), lr=1e-3, weight_decay=1e-2)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(otim, T_max=args.epocas)
     # label smoothing: não deixa o modelo ficar 100% confiante -> probabilidades
@@ -188,10 +227,13 @@ def main():
 
     melhor, sem_melhora = -1.0, 0
     duracao_janela = float(np.median([a[4] for a in amostras]))
+    t_inicio = time.time()
     for ep in range(1, args.epocas + 1):
+        t_ep = time.time()
         modelo.train()
         tot, acertos, n = 0.0, 0, 0
         for x, y in dl_treino:
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             logits = modelo(x)
             perda = perda_fn(logits, y)
             otim.zero_grad(); perda.backward(); otim.step()
@@ -199,13 +241,16 @@ def main():
             acertos += (logits.argmax(1) == y).sum().item()
         sched.step()
 
-        acc_val = avaliar(modelo, dl_val, len(classes))[0] if dl_val else acertos / n
+        acc_val = avaliar(modelo, dl_val, len(classes), device)[0] if dl_val else acertos / n
         if ep % 5 == 0 or ep == 1:
             print(f"época {ep:3d}  perda {tot / n:.3f}  acc treino {acertos / n:.2%}"
-                  + (f"  acc val {acc_val:.2%}" if dl_val else ""))
+                  + (f"  acc val {acc_val:.2%}" if dl_val else "")
+                  + f"  ({time.time() - t_ep:.1f}s)")
         if acc_val > melhor:
             melhor, sem_melhora = acc_val, 0
-            torch.save({"estado": modelo.state_dict(), "classes": classes,
+            # Pesos salvos na CPU: o checkpoint abre em qualquer máquina, com ou sem GPU.
+            estado = {k: v.detach().cpu() for k, v in modelo.state_dict().items()}
+            torch.save({"estado": estado, "classes": classes,
                         "n_features": N_FEATURES, "duracao_janela_s": duracao_janela},
                        args.saida)
         else:
@@ -214,12 +259,13 @@ def main():
                 print(f"Parando: {args.paciencia} épocas sem melhora (early stopping).")
                 break
 
-    print(f"\nMelhor acurácia {'val' if dl_val else 'treino'}: {melhor:.2%} -> {args.saida}")
+    print(f"\nTempo total de treino: {(time.time() - t_inicio) / 60:.1f} min ({ep} épocas)")
+    print(f"Melhor acurácia {'val' if dl_val else 'treino'}: {melhor:.2%} -> {args.saida}")
     print(f"Janela da câmera: {duracao_janela:.2f}s (mediana da duração dos sinais)")
     if dl_val:
-        ck = torch.load(args.saida)
+        ck = torch.load(args.saida, map_location=device)
         modelo.load_state_dict(ck["estado"])
-        _, conf = avaliar(modelo, dl_val, len(classes))
+        _, conf = avaliar(modelo, dl_val, len(classes), device)
         print("\nMatriz de confusão (linha = verdadeiro, coluna = previsto):")
         larg = max(len(c) for c in classes)
         for i, c in enumerate(classes):
