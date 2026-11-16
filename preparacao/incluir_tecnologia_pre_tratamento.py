@@ -126,20 +126,26 @@ def main():
     eh_tar = args.origem.endswith((".tar.gz", ".tgz"))
     if not eh_tar:
         base = os.path.abspath(args.origem)
-    elif args.executar and not os.path.isfile(MANIFESTO_ORIGINAL):
+    elif not os.path.isfile(MANIFESTO_ORIGINAL):
+        if not args.executar:
+            print(f"(dry run) extrairia {args.origem} e organizaria em {PASTA_VIDEOS}; rode com --executar")
+            return
         tmp, base = extrair_tar(args.origem)            # primeira vez: precisa do conteúdo do pacote
-    elif args.executar:
-        # Já organizado antes: só extrai se faltar algum vídeo na pasta unificada.
+    else:
+        # Já organizado antes (o manifesto original está versionado no git): só extrai se faltar
+        # algum vídeo na pasta unificada, como num clone novo, em que dados/videos/ vem vazio.
         _, linhas = ler_manifesto_original(None)
         presentes = {os.path.basename(f) for f in arquivos_da_fonte(FONTE)}  # em qualquer classe
         faltam = [r for r in linhas if r["file"] not in EXCLUIR
                   and nome_arquivo(FONTE, r["video_id"]) not in presentes]
+        if faltam and not args.executar:
+            # O dry run não abre o pacote: sem isto, cada vídeo faltante apareceria como 'ausente'.
+            print(f"(dry run) {len(faltam)} vídeos faltando em {PASTA_VIDEOS}: {args.origem} seria "
+                  "extraído e organizado; rode com --executar")
+            return
         if faltam:
             print(f"{len(faltam)} vídeos faltando na pasta unificada: extraindo o pacote.")
             tmp, base = extrair_tar(args.origem)
-    elif not os.path.isfile(MANIFESTO_ORIGINAL):
-        print(f"(dry run) extrairia {args.origem} e organizaria em {PASTA_VIDEOS}; rode com --executar")
-        return
 
     caminho_manifesto, linhas = ler_manifesto_original(base)
     if args.executar and not os.path.isfile(MANIFESTO_ORIGINAL):

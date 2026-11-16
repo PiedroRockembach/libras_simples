@@ -142,6 +142,41 @@ def recortar_sem_maos(pose, me, md, margem=2):
     return pose[a:b], me[a:b], md[a:b]
 
 
+def recortar_parado(pose, me, md, limiar=0.01, ini=0.05, fim=0.95, margem=3, suav=5):
+    """
+    Remove o início/fim em que a pessoa está PARADA, mesmo com as mãos visíveis.
+
+    recortar_sem_maos só funciona quando as mãos saem do quadro no repouso (Incluir Tecnologia).
+    No MINDS (sobretudo no Kinect, de enquadramento mais aberto) a mão abaixada continua visível e
+    detectada: sem este recorte, o sinal ocupa ~40% dos 32 passos e o resto é pessoa parada.
+
+    Como funciona: velocidade por frame dos punhos da POSE (15, 16; detectados em ~100% dos frames),
+    em larguras de ombro por frame (independe de resolução e distância da câmera), suavizada por média
+    móvel de `suav` frames. Tira-se um piso `limiar` (tremor do detector com a pessoa parada) e
+    mantém-se o trecho entre `ini` e `fim` do movimento ACUMULADO: parado não acumula nada, então o
+    repouso sai; uma pausa NO MEIO do sinal fica, porque está entre movimentos.
+    Calibrado em 2026-11-16: Kinect 5,0 s -> ~2,8 s; Canon 2,9 -> 2,6 s; Incluir ~inalterado.
+    """
+    T = len(pose)
+    if T < 8:
+        return pose, me, md
+    largura = np.nanmedian(np.linalg.norm(pose[:, 11, :2] - pose[:, 12, :2], axis=1))
+    if not np.isfinite(largura) or largura <= 0:
+        return pose, me, md
+    p = pose[:, [15, 16], :2] / largura                      # (T, 2 punhos, xy)
+    k = np.ones(suav) / suav
+    p = np.stack([np.convolve(np.pad(p[:, i, j], suav // 2, mode="edge"), k, "valid")
+                  for i in range(2) for j in range(2)], axis=1).reshape(T, 2, 2)
+    v = np.linalg.norm(np.diff(p, axis=0), axis=2).max(axis=1)  # punho mais rápido em cada frame
+    v = np.maximum(v - limiar, 0)
+    if not np.isfinite(v).all() or v.sum() <= 0:
+        return pose, me, md
+    acum = np.concatenate([[0.0], np.cumsum(v)]) / v.sum()   # (T,) de 0 a 1
+    a = max(int(np.searchsorted(acum, ini)) - margem, 0)
+    b = min(int(np.searchsorted(acum, fim)) + 1 + margem, T)
+    return pose[a:b], me[a:b], md[a:b]
+
+
 def corrigir_aspecto(pose, me, md, largura, altura):
     """
     O MediaPipe devolve x em [0,1] da LARGURA e y em [0,1] da ALTURA.

@@ -40,6 +40,22 @@ O id é o `video_id` do YouTube. O adaptador também aceita uma pasta já extra�
 - Excluídos (textos/músicas sinalizados de 100–160 s): `A sua`, `Simples desejo`, `Amor Sincero`
   (este último foi apagado à mão; no manifesto aparece como `ausente`).
 
+**minds_libras_rgb / minds_libras_rgbd**: MINDS-Libras (UFMG, CC-BY-4.0), 20 sinais × 12
+sinalizantes × 5 repetições, adaptador [preparacao/minds_libras_pre_tratamento.py](preparacao/minds_libras_pre_tratamento.py).
+Lê de `/mnt/hd1tb/libras-data/raw/minds_libras_{rgb,rgbd}/extracted` (repositório bruto compartilhado:
+**links simbólicos**, nunca mover; `--copiar` se precisar de cópia). `rgb` = Canon (1158 vídeos,
+recortados); `rgbd` = só o RGB do Kinect (1200 vídeos de 5 s fixos; Depth/Body/Face ignorados).
+- **Kinect adiado** (decisão do usuário, 2026-11-16): está em `dados/videos` e no cache, mas o
+  `2_treinar.py` o deixa fora por padrão (`--excluir-fontes minds_libras_rgbd`; `--excluir-fontes`
+  vazio inclui).
+- As duas câmeras gravaram **a mesma execução**: o id `s<NN>_<sinal>_r<n>` é igual nas duas fontes,
+  e o manifesto tem a coluna `sinalizador` = `minds_<NN>` (global entre bases, igual nas câmeras).
+  A validação por pessoa do `2_treinar.py` usa essa coluna, o que mantém as duas câmeras juntas.
+- Grafia corrigida no adaptador (`ROTULOS`): `Maca`→`maçã`, `America`→`américa`, `Cinco`→`5`
+  (conferido visualmente contra o `5` da Incluir). 11 classes já existiam; 9 são novas
+  (acontecer, aluno, banco, barulho, esquina, medo, sapo, vacina, vontade).
+- `organizar(..., modo=)` em `base_unificada.py`: `mover` (padrão, Incluir), `copiar` ou `link`.
+
 ### Regras de rótulo (valem para todas as bases; decididas com o usuário)
 Ficam em `normalizar_rotulo()` e `UNIR`, em `base_unificada.py`:
   - tudo em minúsculas (Windows não diferencia caixa em pastas; "Bom dia"/"Bom Dia" são o mesmo sinal);
@@ -68,6 +84,7 @@ Ficam em `normalizar_rotulo()` e `UNIR`, em `base_unificada.py`:
 ```bash
 pip install -r requirements.txt
 python preparacao/incluir_tecnologia_pre_tratamento.py --origem incluir_tecnologia.tar.gz --executar
+python preparacao/minds_libras_pre_tratamento.py --executar
 python 1_extrair.py --videos dados/videos --saida dados/landmarks
 python 2_treinar.py --landmarks dados/landmarks
 python 3_tempo_real.py --modelo modelo_sinais.pt
@@ -84,7 +101,10 @@ python 3_tempo_real.py --modelo modelo_sinais.pt
   - por mão: posição no referencial do corpo (ponto de articulação) + forma relativa ao
     punho escalada pelo tamanho da mão (configuração de mão) + flag de presença;
   - x multiplicado pela razão de aspecto; mãos em slots fixos (esq/dir);
-  - lacunas de detecção de até 6 frames são interpoladas; o início e o fim sem mãos são recortados.
+  - lacunas de detecção de até 6 frames são interpoladas; o início e o fim sem mãos são recortados
+    (`recortar_sem_maos`) e depois o início e o fim **parados** (`recortar_parado`: velocidade dos
+    punhos da pose em larguras de ombro, piso 0,01, mantém 5–95% do movimento acumulado). O
+    segundo existe porque no MINDS a mão em repouso continua visível (Kinect: 5 s → ~2,8 s).
 - **Tempo**: reamostragem para 32 passos + velocidade (diferença entre frames).
 - **Modelo** `ModeloSinais`: LayerNorm+Linear → Conv1D residual → GRU bidirecional →
   pooling média+máx → Linear. A GRU foi escolhida em vez de Transformer por causa
@@ -98,15 +118,14 @@ python 3_tempo_real.py --modelo modelo_sinais.pt
 ## ⚠️ Problema em aberto: 1069 classes, quase todas com 1 vídeo
 O pipeline atual foi pensado para poucas classes com vários vídeos. Com ~1 exemplo por
 classe:
-1. **Validação quase inexistente hoje, mas possível.** Com `--frac-val 0.2`,
-   `dividir_por_video` faz `round(2 × 0.2) = 0` para classes com 2 vídeos e sobram ~13 vídeos de
-   validação. Separando **1 vídeo de cada uma das 104 classes com 2+ vídeos** há uma validação
-   honesta (gravação nunca vista; não necessariamente outra pessoa). Validar com cópias
-   aumentadas do mesmo vídeo é otimista demais.
+1. **Validação**: `dividir()` põe os sinalizantes `--val-sinalizadores` (padrão `minds_11 minds_12`)
+   só na validação (~200 vídeos, 20 classes do MINDS, pessoa nunca vista) e, nos vídeos sem
+   sinalizador (Incluir), usa `--frac-val` por classe, o que dá só ~13 vídeos (`round(2 × 0.2) = 0`).
+   Ainda em aberto: separar **1 vídeo de cada uma das 104 classes da Incluir com 2+ vídeos**.
 2. **Classificação softmax com 1069 saídas e ~1 exemplo cada** tende a decorar. Na câmera,
    a probabilidade se espalha entre muitas classes e raramente passa de 0.7.
 3. **Generalizar para outra pessoa** (quem está na câmera) é o maior risco: o modelo só viu
-   um sinalizante por sinal.
+   um sinalizante por sinal (exceto as 20 classes do MINDS, com 10 pessoas no treino).
 4. O custo de treino cresce com o nº de classes: `repeticoes` (32) amostras por classe por época
    = ~34 mil amostras/época. Na GPU, ~5–9 s por época (ver "Desempenho medido").
 
@@ -126,6 +145,15 @@ classe:
 - Adicionar uma classe `_nada` (pessoa parada ou gesticulando sem sinalizar).
 
 ## Estado / avisos
+- **Treino com Incluir + MINDS Canon (2026-11-16)**, Kinect fora, validação = sinalizantes 11 e 12:
+  early stopping na época 102 (8,4 min, RTX 5060, 4,9 s/época com `--lote 128`). Checkpoint:
+  **pessoas novas top-1 86,0% / top-5 98,5%** (200 vídeos); Incluir 7/13. Todos os erros do MINDS
+  caem em outra classe do MINDS: na prática é um problema de 20 classes, não de 1078.
+  Erros concentrados por pessoa: `5` 0/10 (11 e 12 fazem o sinal na altura do ombro/rosto; os do
+  treino, no peito), `maçã` 0/5 (12), `filho` 1/5 (11), `aproveitar` 1/5 (12). Com só 2 pessoas
+  na validação o número oscila muito entre épocas (67–83%). Confiança média: acertos 0,77,
+  erros 0,34; só 120 de 179 acertos passam do limiar 0,7 da câmera.
+  Extração completa (3545 vídeos, Canon 1080p incluso): 50 min a ~149 frames/s nesta máquina.
 - Validado com dados reais (2026-11-13):
   - `1_extrair.py`: **extração completa feita** (1187 vídeos, 0 erros, `dados/landmarks/`, 64 MB).
     Pose em 100% dos frames, mãos em ~20–80% (a parte sem mãos é a pessoa parada no início e no
@@ -138,16 +166,14 @@ classe:
   ver `requirements.txt`). `2_treinar.py` escolhe `cuda` sozinho (`--dispositivo`), usa
   `--workers` processos no DataLoader (padrão `min(8, núcleos-1)`) e salva os pesos na CPU,
   então o checkpoint abre em máquinas sem GPU (`3_tempo_real.py` carrega com `map_location="cpu"`).
-- **Bugs conhecidos no `2_treinar.py` (ainda não corrigidos):**
-  - Checkpoint só é salvo com `acc_val > melhor` (estrito). Com validação pequena a acurácia
-    satura nas primeiras épocas e o arquivo salvo fica sendo esse modelo quase sem treino
-    (confiança ~25% na câmera). Escolher o checkpoint pela perda de validação.
-  - A matriz de confusão final seria impressa com 1069×1069: trocar por top-1/top-5 e pares mais
-    confundidos.
-  - Divisão de validação: hoje só 13 vídeos (ver item 1 do problema em aberto).
-- Corrigido: `DatasetSinais` usava `alvo = max(vídeos por classe) × repeticoes` (uma classe com
-  4 vídeos fazia TODAS terem 128 amostras: ~137 mil/época). Agora `alvo = max(repeticoes,
-  max vídeos)`: ~34 mil/época.
+- Corrigido em 2026-11-16 no `2_treinar.py`:
+  - checkpoint e early stopping pela **perda de validação** (antes: `acc_val >` estrito, que
+    salvava um modelo das primeiras épocas, com confiança ~25% na câmera);
+  - relatório final com top-1/top-5 por grupo (pessoas novas / outros / total) e os pares mais
+    confundidos; a matriz de confusão só é impressa com ≤ 30 classes;
+  - `DatasetSinais`: exatamente `--repeticoes` (32) amostras por classe por época (~34,5 mil);
+    classe com mais vídeos que isso sorteia um vídeo por amostra (antes `alvo = max(...)` subiria
+    para ~48 com o MINDS em todas as 1078 classes).
 
 ### Desempenho medido (i9-14900HX + RTX 4080 Laptop 12 GB, 2026-11-13)
 | Etapa | Antes | Agora |

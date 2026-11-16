@@ -125,12 +125,38 @@ def _classes_de_outras_fontes(fonte):
     return out
 
 
-def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
-              remover_orfaos=False):
+def _transferir(origem, destino, modo):
     """
-    Move os vídeos da base `fonte` para a pasta unificada. Idempotente: o que já está no
+    Leva um vídeo para a pasta unificada conforme o `modo`:
+      - "mover":  shutil.move (a origem some; ok para pacotes extraídos numa pasta temporária);
+      - "copiar": shutil.copy2 (a origem fica intacta; custa espaço em disco);
+      - "link":   link simbólico absoluto (a origem fica intacta e não custa espaço; o disco de
+                  origem precisa estar montado para extrair os landmarks).
+    Um arquivo que já está DENTRO da pasta unificada (classe antiga após mudar um rótulo) é sempre
+    movido: se for um link, move-se o próprio link (os.rename não segue links).
+    """
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    if os.path.islink(destino) and not os.path.exists(destino):
+        os.remove(destino)                  # link quebrado (origem mudou de lugar): refaz
+    dentro = os.path.commonpath([os.path.abspath(origem), PASTA_VIDEOS]) == PASTA_VIDEOS
+    if modo == "mover" or dentro:
+        shutil.move(origem, destino)
+    elif modo == "copiar":
+        shutil.copy2(origem, destino)
+    elif modo == "link":
+        os.symlink(os.path.abspath(origem), destino)
+    else:
+        raise ValueError(f"modo inválido: {modo!r}")
+
+
+def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
+              remover_orfaos=False, modo="mover"):
+    """
+    Leva os vídeos da base `fonte` para a pasta unificada. Idempotente: o que já está no
     destino é só conferido. Sem `executar`, apenas mostra o plano (dry run).
     metadados: caminhos (arquivos/pastas) da base que não são vídeos -> dados/excluidos/<fonte>/metadados
+    modo: "mover" (padrão), "copiar" ou "link" (ver _transferir). Bases lidas de um repositório
+          de dados brutos compartilhado (ex.: /mnt/hd1tb/libras-data/raw) NÃO devem ser movidas.
     """
     if not re.fullmatch(r"[a-z0-9]+(_[a-z0-9]+)*", fonte):
         raise ValueError(f"nome de fonte inválido: {fonte!r} (use minúsculas, dígitos e _ simples)")
@@ -190,10 +216,13 @@ def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
         print("Rótulos unidos (nomes originais diferentes -> mesma classe):")
         for c, origs in sorted(unidas.items()):
             print(f"  {c!r:28s} <- {sorted(origs)}")
+    if modo not in ("mover", "copiar", "link"):
+        raise ValueError(f"modo inválido: {modo!r}")
     cont = collections.Counter(l["classe"] for l in linhas if l["classe"])
     outras = _classes_de_outras_fontes(fonte)
     em_comum = sorted(set(cont) & set(outras))
-    print(f"{len(plano)} vídeos a mover, {ja_ok} já no lugar | {len(cont)} classes "
+    verbo = {"mover": "mover", "copiar": "copiar", "link": "linkar"}[modo]
+    print(f"{len(plano)} vídeos a {verbo}, {ja_ok} já no lugar | {len(cont)} classes "
           f"({len(em_comum)} já existiam em outras bases) | vídeos por classe: "
           f"{dict(sorted(collections.Counter(cont.values()).items()))} | "
           f"excluídos: {sum(l['status'] == 'excluido' for l in linhas)}")
@@ -225,8 +254,7 @@ def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
     erros = 0
     for origem, destino in plano:
         try:
-            os.makedirs(os.path.dirname(destino), exist_ok=True)
-            shutil.move(origem, destino)
+            _transferir(origem, destino, modo)
         except OSError as e:
             erros += 1
             print(f"[erro] {origem} -> {destino}: {e}")
@@ -245,7 +273,7 @@ def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
 
     escrever_csv(os.path.join(PASTA_MANIFESTOS, f"{fonte}.csv"), linhas)
     atualizar_indice()
-    print(f"Movidos: {len(plano) - erros}, erros: {erros}")
+    print(f"Transferidos ({modo}): {len(plano) - erros}, erros: {erros}")
     conferir(fonte, linhas, verificar_sha)
     return linhas
 

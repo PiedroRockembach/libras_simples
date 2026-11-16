@@ -9,6 +9,8 @@ mesmo quando você não está sinalizando. Classes que começam com "_" são
 treinadas normalmente mas nunca são exibidas como resultado na câmera.
 """
 import argparse
+import collections
+import csv
 import os
 import random
 import time
@@ -19,18 +21,44 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from comum import (N_FEATURES, POSE_PARES, ModeloSinais, corrigir_aspecto,
-                   interpolar_lacunas, preparar_sequencia, recortar_sem_maos)
+                   interpolar_lacunas, preparar_sequencia, recortar_parado,
+                   recortar_sem_maos)
+
+SEP = "__"   # dados/landmarks/<classe>/<fonte>__<id>.npz (ver preparacao/base_unificada.py)
 
 
 # ----------------------------------------------------------------------------
 # Carregamento
 # ----------------------------------------------------------------------------
-def carregar(pasta):
-    classes = sorted(c for c in os.listdir(pasta) if os.path.isdir(os.path.join(pasta, c)))
-    amostras = []                     # (pose, me, md, rótulo, duração_s, nome)
-    for rotulo, classe in enumerate(classes):
+def ler_sinalizadores(pasta_manifestos):
+    """
+    {"<fonte>__<id>": sinalizador} a partir da coluna "sinalizador" dos manifestos de cada base
+    (só bases que informam quem sinaliza, como o MINDS). Vídeos sem essa informação ficam fora.
+    """
+    mapa = {}
+    if not os.path.isdir(pasta_manifestos):
+        return mapa
+    for nome in sorted(os.listdir(pasta_manifestos)):
+        if not nome.endswith(".csv") or nome == "indice.csv" or nome.endswith("_original.csv"):
+            continue
+        with open(os.path.join(pasta_manifestos, nome), encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                if r.get("sinalizador") and r.get("arquivo"):
+                    mapa[os.path.splitext(os.path.basename(r["arquivo"]))[0]] = r["sinalizador"]
+    return mapa
+
+
+def carregar(pasta, excluir_fontes=(), sinalizadores=None):
+    """
+    Devolve (classes, amostras); amostra = (pose, me, md, rótulo, duração_s, nome, sinalizador).
+    excluir_fontes: bases que ficam de fora (pelo prefixo "<fonte>__" do arquivo).
+    Classes que ficarem sem nenhum vídeo não entram (não teriam como ser aprendidas).
+    """
+    sinalizadores = sinalizadores or {}
+    brutas = []
+    for classe in sorted(c for c in os.listdir(pasta) if os.path.isdir(os.path.join(pasta, c))):
         for nome in sorted(os.listdir(os.path.join(pasta, classe))):
-            if not nome.endswith(".npz"):
+            if not nome.endswith(".npz") or nome.split(SEP, 1)[0] in excluir_fontes:
                 continue
             d = np.load(os.path.join(pasta, classe, nome))
             pose, me, md = corrigir_aspecto(d["pose"], d["mao_esq"], d["mao_dir"],
@@ -38,23 +66,34 @@ def carregar(pasta):
             me, md = interpolar_lacunas(me), interpolar_lacunas(md)
             pose = interpolar_lacunas(pose)
             pose, me, md = recortar_sem_maos(pose, me, md)
-            amostras.append((pose, me, md, rotulo, len(pose) / float(d["fps"]),
-                             f"{classe}/{nome}"))
-    return classes, amostras
+            pose, me, md = recortar_parado(pose, me, md)
+            brutas.append((pose, me, md, classe, len(pose) / float(d["fps"]),
+                           f"{classe}/{nome}", sinalizadores.get(os.path.splitext(nome)[0])))
+    classes = sorted({a[3] for a in brutas})
+    idx = {c: i for i, c in enumerate(classes)}
+    return classes, [(*a[:3], idx[a[3]], *a[4:]) for a in brutas]
 
 
-def dividir_por_video(amostras, frac_val, seed=0):
+def dividir(amostras, frac_val, val_sinalizadores=(), seed=0):
     """
-    Divide por VÍDEO, nunca por frame/janela. Janelas do mesmo vídeo são quase
-    idênticas; se uma cai no treino e outra na validação, a validação fica
-    otimista e mente sobre a generalização.
-    Classes com 1 vídeo ficam só no treino (não há o que separar).
+    Divide por VÍDEO, nunca por frame/janela (janelas do mesmo vídeo são quase idênticas; uma
+    no treino e outra na validação deixam a validação otimista).
+
+    1) Vídeos com sinalizador conhecido: vão para a validação se a PESSOA está em
+       `val_sinalizadores`, senão para o treino. Mede o que importa na câmera: acertar o sinal
+       de alguém que o modelo nunca viu. Também mantém juntas as gravações da mesma execução por
+       câmeras diferentes (Canon/Kinect do MINDS), que têm o mesmo sinalizador.
+    2) Os demais (sem sinalizador): por classe, uma fração `frac_val` dos vídeos, sempre
+       deixando pelo menos 1 no treino. Classes com 1 vídeo ficam só no treino.
     """
     rng = random.Random(seed)
-    por_classe = {}
+    val_sin = set(val_sinalizadores)
+    treino, val, por_classe = [], [], {}
     for i, a in enumerate(amostras):
-        por_classe.setdefault(a[3], []).append(i)
-    treino, val = [], []
+        if a[6] is not None:
+            (val if a[6] in val_sin else treino).append(i)
+        else:
+            por_classe.setdefault(a[3], []).append(i)
     for idx in por_classe.values():
         rng.shuffle(idx)
         n_val = int(round(len(idx) * frac_val)) if len(idx) >= 2 else 0
@@ -121,25 +160,28 @@ class DatasetSinais(Dataset):
         self.amostras = amostras
         self.aug = aumentar_dados
         self.rng = random.Random(seed)
-        # Balanceamento: cada classe aparece o mesmo número de vezes por época
-        # (`repeticoes`), ciclando pelos vídeos dela; senão a classe com mais vídeos
-        # domina o treino. Antes o alvo era max(vídeos por classe) × repeticoes: uma
-        # única classe com 4 vídeos fazia TODAS as 1069 terem 128 amostras (4x o custo).
+        # Balanceamento: cada classe aparece EXATAMENTE `repeticoes` vezes por época; senão a
+        # classe com mais vídeos domina o treino (e o custo cresce com ela: antes o alvo era
+        # max(vídeos por classe), e as ~48 gravações de uma classe do MINDS faziam TODAS as
+        # ~1078 classes terem 48+ amostras). Classe com até `repeticoes` vídeos: cicla por eles.
+        # Classe com mais: sorteia um vídeo a cada amostra, então todos aparecem ao longo das
+        # épocas sem aumentar o tamanho da época.
+        self.alvo = repeticoes
         if aumentar_dados:
             por_classe = {}
             for i in indices:
                 por_classe.setdefault(amostras[i][3], []).append(i)
-            # max(): garante que todo vídeo aparece pelo menos uma vez por época
-            alvo = max(repeticoes, max(len(v) for v in por_classe.values()))
-            self.indices = [v[k % len(v)] for v in por_classe.values() for k in range(alvo)]
+            self.itens = [(tuple(v), k) for v in por_classe.values() for k in range(repeticoes)]
         else:
-            self.indices = list(indices)
+            self.itens = [((i,), 0) for i in indices]
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.itens)
 
     def __getitem__(self, k):
-        pose, me, md, rotulo, _, _ = self.amostras[self.indices[k]]
+        videos, j = self.itens[k]
+        i = videos[j % len(videos)] if len(videos) <= self.alvo else self.rng.choice(videos)
+        pose, me, md, rotulo = self.amostras[i][:4]
         if self.aug:
             pose, me, md = aumentar(pose, me, md, self.rng)
         x = preparar_sequencia(pose, me, md)
@@ -160,15 +202,46 @@ def semear_worker(_):
 # ----------------------------------------------------------------------------
 # Treino
 # ----------------------------------------------------------------------------
-def avaliar(modelo, loader, n_classes, device="cpu"):
+def avaliar(modelo, loader, perda_fn, device="cpu"):
+    """Devolve (perda média, top-5 previstos (N, 5), verdadeiros (N,)), na ordem do loader."""
     modelo.eval()
-    conf = np.zeros((n_classes, n_classes), int)
+    perda, tops, ys = 0.0, [], []
     with torch.no_grad():
         for x, y in loader:
-            p = modelo(x.to(device)).argmax(1).cpu()
-            for a, b in zip(y.numpy(), p.numpy()):
-                conf[a, b] += 1
-    return conf.trace() / max(conf.sum(), 1), conf
+            logits = modelo(x.to(device))
+            y = y.to(device)
+            perda += perda_fn(logits, y).item() * len(y)
+            tops.append(logits.topk(min(5, logits.shape[1]), dim=1).indices.cpu())
+            ys.append(y.cpu())
+    y = torch.cat(ys).numpy()
+    return perda / max(len(y), 1), torch.cat(tops).numpy(), y
+
+
+def acertos(top, y):
+    """(top-1, top-5) em fração. Top-5 = o certo está entre os 5 mais prováveis."""
+    if len(y) == 0:
+        return 0.0, 0.0
+    return float((top[:, 0] == y).mean()), float((top == y[:, None]).any(axis=1).mean())
+
+
+def relatorio_final(top, y, grupos, classes):
+    """Top-1/top-5 por grupo de validação e os pares mais confundidos (matriz cheia só se pequena)."""
+    for nome, mascara in grupos.items():
+        if mascara.any():
+            a1, a5 = acertos(top[mascara], y[mascara])
+            print(f"  {nome:34s} {mascara.sum():5d} vídeos  top-1 {a1:6.2%}  top-5 {a5:6.2%}")
+    pares = collections.Counter((classes[a], classes[b]) for a, b in zip(y, top[:, 0]) if a != b)
+    if pares:
+        print("\nPares mais confundidos (verdadeiro -> previsto: vezes):")
+        for (a, b), n in pares.most_common(15):
+            print(f"  {a} -> {b}: {n}")
+    if len(classes) <= 30:
+        conf = np.zeros((len(classes), len(classes)), int)
+        np.add.at(conf, (y, top[:, 0]), 1)
+        print("\nMatriz de confusão (linha = verdadeiro, coluna = previsto):")
+        larg = max(len(c) for c in classes)
+        for i, c in enumerate(classes):
+            print(f"{c:>{larg}} " + " ".join(f"{v:3d}" for v in conf[i]))
 
 
 def main():
@@ -178,7 +251,13 @@ def main():
     ap.add_argument("--epocas", type=int, default=150)
     ap.add_argument("--frac-val", type=float, default=0.2)
     ap.add_argument("--repeticoes", type=int, default=32,
-                    help="cópias aumentadas de cada vídeo por época")
+                    help="amostras aumentadas de CADA CLASSE por época (teto, igual para todas)")
+    ap.add_argument("--manifestos", default="dados/manifestos",
+                    help="de onde vem a coluna 'sinalizador' usada na validação por pessoa")
+    ap.add_argument("--val-sinalizadores", nargs="*", default=["minds_11", "minds_12"],
+                    help="pessoas que ficam SÓ na validação (nunca vistas no treino)")
+    ap.add_argument("--excluir-fontes", nargs="*", default=["minds_libras_rgbd"],
+                    help="bases fora do treino (padrão: Kinect, adiado; passe a flag vazia p/ incluir)")
     ap.add_argument("--paciencia", type=int, default=30)
     ap.add_argument("--lote", type=int, default=32, help="tamanho do lote (batch)")
     ap.add_argument("--workers", type=int, default=min(8, max(0, (os.cpu_count() or 1) - 1)),
@@ -197,9 +276,23 @@ def main():
           + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else "")
           + f" | workers: {args.workers}")
 
-    classes, amostras = carregar(args.landmarks)
-    print(f"{len(classes)} classes, {len(amostras)} vídeos: {classes}")
-    treino, val = dividir_por_video(amostras, args.frac_val)
+    classes, amostras = carregar(args.landmarks, args.excluir_fontes,
+                                 ler_sinalizadores(args.manifestos))
+    por_fonte = collections.Counter(a[5].split("/", 1)[1].split(SEP, 1)[0] for a in amostras)
+    print(f"{len(classes)} classes, {len(amostras)} vídeos {dict(por_fonte)}"
+          + (f" | fora: {args.excluir_fontes}" if args.excluir_fontes else ""))
+    treino, val = dividir(amostras, args.frac_val, args.val_sinalizadores)
+    vistos = {a[6] for a in amostras if a[6]}
+    faltam = set(args.val_sinalizadores) - vistos
+    if faltam:
+        print(f"[aviso] sinalizadores de validação sem nenhum vídeo: {sorted(faltam)}")
+    # Grupos de validação, na ordem de `val` (= ordem do dl_val, que não embaralha).
+    tem_sin = np.array([amostras[i][6] is not None for i in val], bool)
+    grupos = {f"pessoas novas {sorted(set(args.val_sinalizadores) & vistos)}": tem_sin,
+              "outros (gravação nova, sem id de pessoa)": ~tem_sin,
+              "total": np.ones(len(val), bool)}
+    print(f"Treino: {len(treino)} vídeos | validação: {len(val)} "
+          f"({tem_sin.sum()} de pessoas novas, {(~tem_sin).sum()} outros)")
     if not val:
         print("[aviso] nenhuma classe tem 2+ vídeos: sem validação. A acurácia de "
               "treino NÃO diz se o modelo generaliza. Grave mais vídeos por classe.")
@@ -225,29 +318,38 @@ def main():
     # mais honestas, o que importa para o limiar de confiança na câmera.
     perda_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    melhor, sem_melhora = -1.0, 0
+    # Checkpoint e early stopping pela PERDA de validação, não pela acurácia: com poucos vídeos
+    # de validação a acurácia anda em degraus e satura cedo; com o critério estrito ">" o arquivo
+    # ficava sendo um modelo das primeiras épocas, quase sem treino. A perda é contínua e também
+    # melhora quando a probabilidade do certo sobe, o que importa para o limiar da câmera.
+    melhor, sem_melhora = float("inf"), 0
     duracao_janela = float(np.median([a[4] for a in amostras]))
     t_inicio = time.time()
     for ep in range(1, args.epocas + 1):
         t_ep = time.time()
         modelo.train()
-        tot, acertos, n = 0.0, 0, 0
+        tot, certos, n = 0.0, 0, 0
         for x, y in dl_treino:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             logits = modelo(x)
             perda = perda_fn(logits, y)
             otim.zero_grad(); perda.backward(); otim.step()
             tot += perda.item() * len(y); n += len(y)
-            acertos += (logits.argmax(1) == y).sum().item()
+            certos += (logits.argmax(1) == y).sum().item()
         sched.step()
 
-        acc_val = avaliar(modelo, dl_val, len(classes), device)[0] if dl_val else acertos / n
+        if dl_val:
+            perda_val, top, yv = avaliar(modelo, dl_val, perda_fn, device)
+            a1, a5 = acertos(top, yv)
+        else:
+            perda_val = tot / n                       # sem validação: só resta a perda de treino
         if ep % 5 == 0 or ep == 1:
-            print(f"época {ep:3d}  perda {tot / n:.3f}  acc treino {acertos / n:.2%}"
-                  + (f"  acc val {acc_val:.2%}" if dl_val else "")
+            print(f"época {ep:3d}  perda {tot / n:.3f}  acc treino {certos / n:.2%}"
+                  + (f"  | val: perda {perda_val:.3f}  top-1 {a1:.2%}  top-5 {a5:.2%}"
+                     if dl_val else "")
                   + f"  ({time.time() - t_ep:.1f}s)")
-        if acc_val > melhor:
-            melhor, sem_melhora = acc_val, 0
+        if perda_val < melhor:
+            melhor, sem_melhora = perda_val, 0
             # Pesos salvos na CPU: o checkpoint abre em qualquer máquina, com ou sem GPU.
             estado = {k: v.detach().cpu() for k, v in modelo.state_dict().items()}
             torch.save({"estado": estado, "classes": classes,
@@ -260,16 +362,14 @@ def main():
                 break
 
     print(f"\nTempo total de treino: {(time.time() - t_inicio) / 60:.1f} min ({ep} épocas)")
-    print(f"Melhor acurácia {'val' if dl_val else 'treino'}: {melhor:.2%} -> {args.saida}")
+    print(f"Melhor perda {'val' if dl_val else 'treino'}: {melhor:.3f} -> {args.saida}")
     print(f"Janela da câmera: {duracao_janela:.2f}s (mediana da duração dos sinais)")
     if dl_val:
         ck = torch.load(args.saida, map_location=device)
         modelo.load_state_dict(ck["estado"])
-        _, conf = avaliar(modelo, dl_val, len(classes), device)
-        print("\nMatriz de confusão (linha = verdadeiro, coluna = previsto):")
-        larg = max(len(c) for c in classes)
-        for i, c in enumerate(classes):
-            print(f"{c:>{larg}} " + " ".join(f"{v:3d}" for v in conf[i]))
+        _, top, yv = avaliar(modelo, dl_val, perda_fn, device)
+        print("\nValidação do checkpoint salvo:")
+        relatorio_final(top, yv, grupos, classes)
 
 
 if __name__ == "__main__":
