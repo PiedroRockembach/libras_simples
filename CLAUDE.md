@@ -56,6 +56,26 @@ recortados); `rgbd` = só o RGB do Kinect (1200 vídeos de 5 s fixos; Depth/Body
   (acontecer, aluno, banco, barulho, esquina, medo, sapo, vacina, vontade).
 - `organizar(..., modo=)` em `base_unificada.py`: `mover` (padrão, Incluir), `copiar` ou `link`.
 
+### Catálogo unificado de treino (MALTA-LIBRAS + V-LIBRASIL, 2026-11-18)
+[preparacao/catalogo_unificado.py](preparacao/catalogo_unificado.py) gera `dados/catalogo_treino.csv`:
+uma linha por vídeo (nossos + fontes do repositório `../ISLR_LIBRAS`, do Malta Lab), só com as
+classes que têm **>= 3 exemplos obteníveis** (`--min-videos`; vídeos da mesma pessoa contam,
+decisão do usuário; Canon+Kinect da mesma execução = 1). Ainda **não baixa nada**: `status` =
+`local` (já temos) / `baixar` (tem link) / `sem_link` (listado, não conta).
+- Resultado: **1388 classes**, 7184 vídeos obteníveis (2777 já temos, 4407 a baixar).
+  `confianca_classe`: **alta** = 255 classes (atingem o mínimo sem o V-LIBRASIL); **media** = 1133
+  (precisam do V-LIBRASIL; 718 delas só existem nele).
+- Regras: rótulo pela coluna `checked` do MALTA (a `lemma` é de lematizador e erra: "água"→"aguo");
+  classe = (palavra, **variante**) pelo `group` anotado no MALTA; nossas classes ganham a variante
+  pelo vídeo correspondente no "Youtube" do MALTA (= nossa Incluir; casado por título + altura;
+  **não entra de novo**). Fonte sem variante (V-LIBRASIL) só une se a palavra tiver UMA forma
+  conhecida. Variante nova de palavra com outras formas vira `palavra (vN)` (N = group do MALTA).
+- Sem link nos CSVs: Acessibilidade v2 e UFSC Corpus (o Corpus usa os nomes de arquivo do
+  SignBank, mas é outra gravação; casar por eles baixaria a duplicata errada). Spread the Sign
+  com 2+ links para a palavra também fica sem link (não dá para saber qual é).
+- Identidade dos 3 sinalizantes do V-LIBRASIL é desconhecida; links não testados (rede bloqueada
+  no ambiente onde o catálogo foi gerado).
+
 ### Regras de rótulo (valem para todas as bases; decididas com o usuário)
 Ficam em `normalizar_rotulo()` e `UNIR`, em `base_unificada.py`:
   - tudo em minúsculas (Windows não diferencia caixa em pastas; "Bom dia"/"Bom Dia" são o mesmo sinal);

@@ -7,6 +7,8 @@ dados/*
 # ...mas os manifestos SÃO versionados (pequenos): registram qual vídeo está em
 # qual classe e permitem ver no diff quando uma regra de rótulo muda.
 !dados/manifestos/
+# ...e o catálogo unificado de treino (gerado por preparacao/catalogo_unificado.py).
+!dados/catalogo_treino.csv
 
 # Pacotes originais das bases (centenas de MB; o GitHub recusa arquivos > 100 MB)
 *.tar.gz
