@@ -7,3 +7,7 @@ numpy
 #   pip install torch --index-url https://download.pytorch.org/whl/cu132
 # Confira:  python -c "import torch; print(torch.cuda.is_available())"
 torch
+# Só para baixar os vídeos (preparacao/baixar_videos.py): yt-dlp = YouTube (Incluir Tecnologia);
+# truststore = verifica certificados pelo sistema operacional (o SignBank da UFSC falha sem ele).
+yt-dlp
+truststore

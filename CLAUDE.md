@@ -103,6 +103,9 @@ Ficam em `normalizar_rotulo()` e `UNIR`, em `base_unificada.py`:
 
 ```bash
 pip install -r requirements.txt
+# máquina nova: baixa tudo e organiza em dados/videos/ (sem --executar, só mostra o plano)
+python preparacao/baixar_videos.py --executar --organizar
+# ...ou, com os pacotes já em disco:
 python preparacao/incluir_tecnologia_pre_tratamento.py --origem incluir_tecnologia.tar.gz --executar
 python preparacao/minds_libras_pre_tratamento.py --executar
 python 1_extrair.py --videos dados/videos --saida dados/landmarks
@@ -110,16 +113,51 @@ python 2_treinar.py --landmarks dados/landmarks
 python 3_tempo_real.py --modelo modelo_sinais.pt
 ```
 
+### Download automático (`preparacao/baixar_videos.py`, 2026-11-18)
+Reproduz os dados numa máquina nova. Brutos em `dados/brutos/<fonte>/` (fora do git), logs por
+vídeo em `dados/brutos/_logs/<fonte>.csv`. Dry run por padrão; idempotente; `--limite N` para teste.
+- `incluir_tecnologia`: YouTube via **yt-dlp**, pelos `video_id` de `dados/manifestos/incluir_tecnologia_original.csv`
+  (só vídeo, mp4 ≤ 1080p). O sha256 pode diferir do pacote original (o YouTube reprocessa);
+  se o `.tar.gz` existir, prefira-o.
+- `minds_libras_rgb` / `minds_libras_rgbd`: API do **Zenodo** (2667329: 12 zips, 60 GB;
+  4322984: 12 zips, 29 GB). Retoma downloads (HTTP Range), confere MD5, extrai **só** os vídeos RGB
+  que o adaptador reconhece (usa os mesmos padrões `PADRAO_RGB/RGBD`) e apaga o zip
+  (`--manter-zips`). Marcador `zips/<zip>.ok` evita baixar de novo.
+- `catalogo` (ou uma fonte só): links `status=baixar` do `dados/catalogo_treino.csv`; nome do
+  arquivo = o do link (único por fonte). **Ainda sem adaptador** para `dados/videos/`.
+- `--organizar` chama os adaptadores: Incluir (move) e MINDS com `--modo mover` (opção nova do
+  adaptador; no Windows, link simbólico exige administrador).
+- Rede: verificação SSL pelo sistema operacional via **truststore** (o SignBank da UFSC não envia
+  o certificado intermediário: o Python puro falha). No máx. 2 conexões por site; "disjuntor": 5
+  falhas seguidas num site pulam o resto dele (rodar de novo tenta só o que faltou).
+- Testado em 2026-11-18 (cópia isolada): YouTube, Acessibilidade v3, Spread the Sign, UFV e
+  SignBank ok; retomada + MD5 ok; Zenodo aceita Range; extração seletiva ok. **Fora do ar nesse
+  dia**: V-LIBRASIL (502 até na página inicial) e USP (handshake TLS sem resposta).
+
 ## Decisões já tomadas (e por quê)
-- **MediaPipe com a API Tasks** (`HandLandmarker` + `PoseLandmarker`, modo VIDEO).
+- **MediaPipe com a API Tasks** (`HandLandmarker` + `PoseLandmarker` + `FaceLandmarker`, modo VIDEO).
   O `mp.solutions` (Holistic/Hands) **não existe mais** desde o mediapipe 0.10.3x (o venv usa
   1.2.3, onde a API Tasks foi testada): não usar.
   Os modelos `.task` são baixados automaticamente para `modelos_mediapipe/`.
 - **Landmarks em vez de pixels**: invariância a fundo, luz e pessoa; viável com poucos dados.
-- **Features guiadas pela fonologia da Libras** (por frame: 226; com velocidade: 452):
+- **Sequência = dict de partes** (`comum.py`): `pose` (T,33,3), `mao_esq`/`mao_dir` (T,21,3),
+  `rosto` (T,20,3), `expressao` (T,52). Recortes no tempo (`fatiar`), aspecto e interpolação
+  valem para todas as partes de uma vez; treino e câmera usam o mesmo `limpar()`.
+- **Cache versionado** (`VERSAO_CACHE` em `comum.py`, campo `versao` no .npz): 1 = pose+mãos,
+  **2 = + rosto** (2026-11-18). O `1_extrair.py` re-extrai sozinho os arquivos de versão menor;
+  o `2_treinar.py` ainda lê os de versão 1, com o rosto "ausente" (e avisa).
+- **Features guiadas pela fonologia da Libras** (por frame: 344; com velocidade: **688**):
   - pose (nariz, ombros, cotovelos, punhos) normalizada pelo centro e largura dos ombros;
   - por mão: posição no referencial do corpo (ponto de articulação) + forma relativa ao
-    punho escalada pelo tamanho da mão (configuração de mão) + flag de presença;
+    punho escalada pelo tamanho da mão (configuração de mão) + flag de presença
+    + **punho e pontas dos dedos no referencial do rosto** (origem no nariz, unidade = largura
+    do rosto) + **distância mínima mão-rosto** (sem mão/rosto = 3,0, nunca 0 = "encostando");
+  - **rosto**: 20 pontos de referência (`ROSTO_IDX`: testa, olhos, sobrancelhas, nariz, boca,
+    queixo, bochechas, têmporas, mandíbula) no referencial do rosto (inclinação/rotação da cabeça)
+    + **51 blendshapes** (expressão: sobrancelhas, olhos, bochechas, boca; sem o `_neutral`)
+    + flag de presença. Só 20 dos 478 pontos vão para o cache (os 478 o deixariam ~20x maior).
+  - espelhamento troca também os pontos pareados do rosto e os blendshapes `...Left`/`...Right`;
+  - limitação: a distância mão-rosto é 2D, então mão NA FRENTE do rosto conta como "encostando";
   - x multiplicado pela razão de aspecto; mãos em slots fixos (esq/dir);
   - lacunas de detecção de até 6 frames são interpoladas; o início e o fim sem mãos são recortados
     (`recortar_sem_maos`) e depois o início e o fim **parados** (`recortar_parado`: velocidade dos
@@ -207,14 +245,20 @@ classe:
   Python) e despachar as operações. Trocar de placa muda pouco; mais núcleos e lote maior, sim.
 - A 1ª época é mais lenta (~20 s): no Windows os processos do DataLoader são criados do zero.
 - Câmera: remover o sufixo `(n)` das variantes só na exibição ("feliz (2)" → "feliz").
-- Em Libras, expressões faciais são gramaticais e ainda não estão nas features
-  (próximo passo possível: subconjunto do `FaceLandmarker`).
+- **Rosto adicionado em 2026-11-18** (ver "Decisões"). Validado nesta máquina: regressão com as
+  features antigas idêntica (diferença 0), rosto detectado em 91–100% dos frames, ~9 ms/frame a mais
+  na extração, tempo real ~16–20 fps. **Pendente**: re-extrair tudo (`1_extrair.py` refaz o cache
+  v1) e re-treinar; comparar com o treino sem rosto (pessoas novas top-1 86,0%). O
+  `modelo_sinais.pt` atual (452 features) é recusado pelo `3_tempo_real.py` até re-treinar.
+  Possível melhoria: os blendshapes têm um "neutro" diferente por pessoa (ex.: `mouthShrugLower`
+  alto no sinalizante da Incluir); subtrair uma linha de base por pessoa pode ajudar.
 
 ## Convenções
 - Qualquer mudança de pré-processamento vai em `comum.py` e vale para o treino **e** a
   câmera (evitar training-serving skew).
 - Mudou as features? Atualize `N_FEATURES` e re-treine. O cache de landmarks brutos
-  continua válido; só re-extraia se mudar o que o MediaPipe salva.
+  continua válido; só re-extraia se mudar o que o MediaPipe salva, e nesse caso **suba
+  `VERSAO_CACHE`** (o `1_extrair.py` refaz só os arquivos desatualizados).
 - Dividir dados sempre por vídeo, nunca por frame ou janela.
 - Mudança na organização/rótulos do dataset vai nos scripts de `preparacao/`, nunca à mão, para
   continuar reprodutível a partir dos pacotes originais. Regra que vale para todas as bases fica

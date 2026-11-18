@@ -24,12 +24,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import cv2
 import numpy as np
 
-from comum import ExtratorLandmarks, baixar_modelos
+from comum import VERSAO_CACHE, ExtratorLandmarks, baixar_modelos, empilhar
 
 EXTENSOES = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 
 
 def extrair_video(caminho):
+    """Devolve (sequência, fps, largura, altura); sequência = dict com pose, mãos, rosto, expressão."""
     cap = cv2.VideoCapture(caminho)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     largura = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
@@ -37,35 +38,42 @@ def extrair_video(caminho):
     # Um extrator novo por vídeo: o rastreamento do vídeo anterior não deve
     # "vazar" para o primeiro frame do próximo.
     ext = ExtratorLandmarks()
-    poses, mes, mds = [], [], []
-    i = 0
+    frames = []
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        p, me, md = ext.processar(frame, i * 1000.0 / fps)
-        poses.append(p); mes.append(me); mds.append(md)
-        i += 1
+        frames.append(ext.processar(frame, len(frames) * 1000.0 / fps))
     cap.release()
     ext.fechar()
-    return (np.array(poses), np.array(mes), np.array(mds), fps, largura, altura)
+    return empilhar(frames), fps, largura, altura
+
+
+def versao_do_cache(caminho):
+    """Versão gravada num .npz do cache (1 = antigo, sem o campo). None = ilegível/corrompido."""
+    try:
+        with np.load(caminho) as d:
+            return int(d["versao"]) if "versao" in d.files else 1
+    except Exception:
+        return None
 
 
 def processar(origem, destino):
     """Roda num processo separado: extrai, salva e devolve um resumo (ou o erro)."""
     try:
-        pose, me, md, fps, w, h = extrair_video(origem)
-        if len(pose) == 0:
+        seq, fps, w, h = extrair_video(origem)
+        if len(seq["pose"]) == 0:
             return origem, None, "não consegui ler o vídeo"
         # Escrita atômica: grava num temporário e renomeia. Se o processo morrer no
         # meio, não sobra um .npz pela metade que seria tratado como "já processado".
         tmp = destino + ".tmp"
         with open(tmp, "wb") as f:
-            np.savez_compressed(f, pose=pose, mao_esq=me, mao_dir=md,
-                                fps=fps, largura=w, altura=h)
+            np.savez_compressed(f, **seq, fps=fps, largura=w, altura=h, versao=VERSAO_CACHE)
         os.replace(tmp, destino)
-        taxa = float(np.mean(~np.isnan(me[:, 0, 0]) | ~np.isnan(md[:, 0, 0])))
-        return origem, (len(pose), taxa), None
+        tem = lambda a: ~np.isnan(a.reshape(len(a), -1)[:, 0])   # noqa: E731
+        taxa_mao = float(np.mean(tem(seq["mao_esq"]) | tem(seq["mao_dir"])))
+        taxa_rosto = float(np.mean(tem(seq["rosto"])))
+        return origem, (len(seq["pose"]), taxa_mao, taxa_rosto), None
     except Exception as e:                       # um vídeo ruim não derruba os outros
         return origem, None, f"{type(e).__name__}: {e}"
 
@@ -79,7 +87,7 @@ def main():
     ap.add_argument("--processos", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     args = ap.parse_args()
 
-    tarefas = []
+    tarefas, desatualizados = [], 0
     for classe in sorted(os.listdir(args.videos)):
         pasta = os.path.join(args.videos, classe)
         if not os.path.isdir(pasta):
@@ -89,17 +97,23 @@ def main():
                 continue
             destino = os.path.join(args.saida, classe, os.path.splitext(nome)[0] + ".npz")
             if os.path.exists(destino):
-                continue                         # cache: já processado
+                # Cache: pula o que já foi processado COM a versão atual. Arquivo de uma versão
+                # antiga (ex.: sem rosto) é refeito, senão o treino ficaria sem a informação nova.
+                v = versao_do_cache(destino)
+                if v is not None and v >= VERSAO_CACHE:
+                    continue
+                desatualizados += 1
             os.makedirs(os.path.dirname(destino), exist_ok=True)
             tarefas.append((os.path.join(pasta, nome), destino))
 
     if not tarefas:
-        print("Nada a fazer: todos os vídeos já estão no cache.")
+        print("Nada a fazer: todos os vídeos já estão no cache (versão atual).")
         return
     # Baixa os modelos ANTES de abrir os processos (senão todos baixariam juntos
     # e escreveriam o mesmo arquivo ao mesmo tempo).
     baixar_modelos()
-    print(f"{len(tarefas)} vídeos a processar com {args.processos} processos...")
+    print(f"{len(tarefas)} vídeos a processar ({desatualizados} de cache antigo, versão < "
+          f"{VERSAO_CACHE}) com {args.processos} processos...")
 
     t0, feitos, frames, erros = time.time(), 0, 0, 0
     with ProcessPoolExecutor(max_workers=args.processos) as pool:
@@ -112,11 +126,13 @@ def main():
                 erros += 1
                 print(f"  [erro] {nome}: {erro}")
                 continue
-            n, taxa = res
+            n, taxa, taxa_rosto = res
             frames += n
-            aviso = "  [aviso] poucas detecções de mão" if taxa < 0.3 else ""
+            aviso = ("  [aviso] poucas detecções de mão" if taxa < 0.3 else "") + \
+                    ("  [aviso] poucas detecções de rosto" if taxa_rosto < 0.5 else "")
             dt = time.time() - t0
-            print(f"[{feitos}/{len(tarefas)}] {nome}: {n} frames, mão em {taxa:.0%} | "
+            print(f"[{feitos}/{len(tarefas)}] {nome}: {n} frames, mão em {taxa:.0%}, "
+                  f"rosto em {taxa_rosto:.0%} | "
                   f"{frames / dt:.0f} frames/s, faltam ~{dt / feitos * (len(tarefas) - feitos) / 60:.0f} min"
                   + aviso)
     print(f"\nConcluído em {(time.time() - t0) / 60:.1f} min: {feitos - erros} ok, {erros} erros.")

@@ -146,10 +146,36 @@ Um sinal de Libras se define por parâmetros. Cada um vira uma parte do vetor:
 | Parâmetro | Feature |
 |---|---|
 | Configuração de mão | pontos da mão relativos ao punho, divididos pelo tamanho da mão |
-| Ponto de articulação | posição da mão relativa ao centro dos ombros, dividida pela largura dos ombros |
+| Ponto de articulação | posição da mão relativa ao centro dos ombros (dividida pela largura dos ombros) **e relativa ao rosto** (dividida pela largura do rosto), mais a distância mínima entre mão e rosto |
 | Movimento | a sequência no tempo + velocidades (diferença entre frames) |
 | Orientação | implícita na coordenada 3D da mão |
-| Expressões não-manuais | **não incluídas**: veja "Próximos passos" |
+| Expressões não-manuais | 51 *blendshapes* do rosto + 20 pontos de referência do rosto no referencial dele |
+
+**Por que o rosto.** Em Libras, o rosto entra de dois jeitos:
+- **Como gramática.** As expressões não-manuais marcam pergunta, negação e
+  intensidade, e alguns sinais só se distinguem por elas.
+- **Como lugar.** Muitos sinais diferem só pelo ponto do rosto que a mão toca:
+  queixo, bochecha, testa ou boca. O referencial do corpo (ombros) é grosseiro
+  demais para isso. Por isso a posição da mão também é medida no **referencial do
+  rosto** (origem no nariz, unidade = largura do rosto).
+
+Além disso, o modelo recebe pronta a **distância mínima** entre a mão e o rosto. Ele
+poderia aprender isso sozinho, mas com poucos exemplos por sinal vale entregar a
+informação "encostou?" explicitamente. Sem mão ou sem rosto, essa distância vale
+3,0 (longe), nunca 0: zero significaria "encostando". Uma limitação: a distância é
+medida na imagem 2D, então a mão *na frente* do rosto também conta como encostando.
+
+**Blendshapes em vez de pontos para a expressão.** O `FaceLandmarker` devolve 478
+pontos e 52 *blendshapes*, coeficientes de 0 a 1 com nomes como `browInnerUp`
+(sobrancelhas levantadas), `jawOpen`, `cheekPuff` e `mouthPucker`. Os blendshapes
+já resumem a expressão de um jeito independente do tamanho e da posição do rosto.
+Dos 478 pontos guardamos só 20 de referência: eles servem para saber *onde* estão
+as partes do rosto e como a cabeça está inclinada. Os 478 deixariam o cache cerca
+de 20× maior.
+
+**Espelhamento com rosto.** Ao espelhar o vídeo na augmentation, não basta inverter x:
+os pontos pareados (olho esquerdo ↔ direito) e os blendshapes `...Left` ↔ `...Right`
+também trocam de lugar. Senão a imagem espelhada teria o sorriso do lado errado.
 
 **Normalização.** A mesma pessoa, a 1 m ou a 2 m da câmera, gera coordenadas
 completamente diferentes. Colocar a origem no meio dos ombros e usar a largura dos
@@ -182,7 +208,7 @@ rede poderia aprender isso sozinha, mas com poucos dados vale entregar pronto.
 
 **Arquitetura (`ModeloSinais`):**
 
-1. `LayerNorm + Linear`: projeta as 452 features num espaço de 128.
+1. `LayerNorm + Linear`: projeta as 688 features num espaço de 128.
 2. `Conv1D` (kernel 5): detecta padrões locais, como "mão subindo" ou "dedo fechando",
    em ~5 frames vizinhos. Conexão residual para não atrapalhar o gradiente.
 3. `GRU bidirecional`: lê a sequência nos dois sentidos e aprende a *ordem* dos
@@ -299,9 +325,10 @@ cobre essa diferença.
 
 ## 6. Próximos passos
 
-- **Expressões faciais:** em Libras elas são gramaticais (pergunta, negação, intensidade).
-  Adicione o `FaceLandmarker` e use um subconjunto de ~20 pontos (sobrancelhas,
-  boca), normalizado como a pose.
+- **Linha de base da expressão por pessoa:** o rosto "neutro" muda de uma pessoa
+  para outra (algumas têm a boca naturalmente mais caída, por exemplo). Subtrair o
+  neutro de cada pessoa dos blendshapes deixaria só a *variação* da expressão, que é
+  o que carrega significado.
 - **Segmentação melhor:** detectar início e fim pela velocidade das mãos, em vez
   de janela fixa.
 - **Mais dados por classe:** o gargalo aqui não é o número de sinais, mas os
@@ -317,7 +344,10 @@ cobre essa diferença.
 pip install -r requirements.txt
 # com GPU NVIDIA no Windows, troque o torch só-CPU pela versão CUDA (veja requirements.txt):
 pip install torch --index-url https://download.pytorch.org/whl/cu132
-# uma vez por base: leva a base para dados/videos/ (sem --executar, só mostra o plano)
+# máquina nova: baixa os vídeos de todas as bases e organiza em dados/videos/
+# (sem --executar, só mostra o plano e o espaço em disco; --limite 2 faz um teste rápido)
+python preparacao/baixar_videos.py --executar --organizar
+# ...ou, com o pacote já em disco, uma vez por base:
 python preparacao/incluir_tecnologia_pre_tratamento.py --origem incluir_tecnologia.tar.gz --executar
 python 1_extrair.py --videos dados/videos --saida dados/landmarks
 python 2_treinar.py --landmarks dados/landmarks

@@ -16,8 +16,8 @@ import cv2
 import numpy as np
 import torch
 
-from comum import (ExtratorLandmarks, ModeloSinais, corrigir_aspecto,
-                   interpolar_lacunas, preparar_sequencia)
+from comum import (N_FEATURES, ExtratorLandmarks, ModeloSinais, empilhar, limpar,
+                   preparar_sequencia)
 
 CONEXOES_MAO = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
                 (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15),
@@ -33,6 +33,15 @@ def desenhar_mao(img, mao, cor):
         cv2.line(img, pts[a], pts[b], cor, 2)
 
 
+def desenhar_rosto(img, rosto, cor=(80, 220, 80)):
+    """Os 20 pontos de referência do rosto (os mesmos que viram features)."""
+    if np.isnan(rosto[0, 0]):
+        return
+    h, w = img.shape[:2]
+    for x, y, _ in rosto:
+        cv2.circle(img, (int(x * w), int(y * h)), 2, cor, -1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modelo", default="modelo_sinais.pt")
@@ -46,6 +55,11 @@ def main():
     # map_location="cpu": a inferência de 1 janela por vez é leve e roda bem na CPU;
     # também garante que um modelo treinado na GPU abra numa máquina sem GPU.
     ck = torch.load(args.modelo, map_location="cpu")
+    if ck["n_features"] != N_FEATURES:
+        # O modelo foi treinado com outro conjunto de features (ex.: antes do rosto). Rodar assim
+        # daria erro de dimensão, ou pior, se coincidisse, features no lugar errado.
+        raise SystemExit(f"[erro] o modelo espera {ck['n_features']} features, mas o comum.py atual "
+                         f"gera {N_FEATURES}. Re-treine com o 2_treinar.py.")
     classes = ck["classes"]
     modelo = ModeloSinais(ck["n_features"], len(classes))
     modelo.load_state_dict(ck["estado"])
@@ -54,7 +68,7 @@ def main():
 
     ext = ExtratorLandmarks()
     cap = cv2.VideoCapture(args.camera)
-    buffer = deque()                        # (tempo, pose, mao_esq, mao_dir)
+    buffer = deque()                        # (tempo, frame) com frame = dict de partes (comum.py)
     historico = deque(maxlen=args.estabilidade)
     frase, ultimo_aceito, t0, n_frame = [], None, time.time(), 0
     texto_atual = ""
@@ -67,20 +81,18 @@ def main():
         h, w = frame.shape[:2]
         # Processa o frame SEM espelhar, igual aos vídeos de treino.
         # (Espelhamos só a imagem exibida, mais natural para quem se vê.)
-        pose, me, md = ext.processar(frame, agora * 1000)
-        buffer.append((agora, pose, me, md))
+        atual = ext.processar(frame, agora * 1000)
+        buffer.append((agora, atual))
         while buffer and agora - buffer[0][0] > janela_s:
             buffer.popleft()
 
         n_frame += 1
-        tem_mao = sum(not np.isnan(b[2][0, 0]) or not np.isnan(b[3][0, 0]) for b in buffer)
+        tem_mao = sum(not np.isnan(f["mao_esq"][0, 0]) or not np.isnan(f["mao_dir"][0, 0])
+                      for _, f in buffer)
         # Só prevê a cada 2 frames, com janela cheia e mãos visíveis na maior parte
         if n_frame % 2 == 0 and len(buffer) >= 8 and tem_mao > 0.6 * len(buffer):
-            P = np.array([b[1] for b in buffer]); E = np.array([b[2] for b in buffer])
-            D = np.array([b[3] for b in buffer])
-            P, E, D = corrigir_aspecto(P, E, D, w, h)
-            E, D, P = interpolar_lacunas(E), interpolar_lacunas(D), interpolar_lacunas(P)
-            x = torch.from_numpy(preparar_sequencia(P, E, D))[None]
+            seq = limpar(empilhar([f for _, f in buffer]), w, h)   # o MESMO limpar do treino
+            x = torch.from_numpy(preparar_sequencia(seq))[None]
             with torch.no_grad():
                 prob = torch.softmax(modelo(x), dim=1)[0].numpy()
             k = int(prob.argmax())
@@ -101,8 +113,9 @@ def main():
             ultimo_aceito = None            # mãos abaixadas: permite repetir o sinal
 
         tela = frame.copy()
-        desenhar_mao(tela, me, (0, 200, 255))
-        desenhar_mao(tela, md, (255, 120, 0))
+        desenhar_mao(tela, atual["mao_esq"], (0, 200, 255))
+        desenhar_mao(tela, atual["mao_dir"], (255, 120, 0))
+        desenhar_rosto(tela, atual["rosto"])
         tela = cv2.flip(tela, 1)
         cv2.rectangle(tela, (0, 0), (w, 70), (0, 0, 0), -1)
         cv2.putText(tela, texto_atual, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)

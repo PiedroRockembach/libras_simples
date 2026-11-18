@@ -20,9 +20,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from comum import (N_FEATURES, POSE_PARES, ModeloSinais, corrigir_aspecto,
-                   interpolar_lacunas, preparar_sequencia, recortar_parado,
-                   recortar_sem_maos)
+from comum import (EXPRESSOES_ESPELHO, N_FEATURES, PONTOS, POSE_PARES, ROSTO_PARES,
+                   VERSAO_CACHE, ModeloSinais, carregar_npz, fatiar, limpar,
+                   preparar_sequencia, recortar_parado, recortar_sem_maos)
 
 SEP = "__"   # dados/landmarks/<classe>/<fonte>__<id>.npz (ver preparacao/base_unificada.py)
 
@@ -50,28 +50,29 @@ def ler_sinalizadores(pasta_manifestos):
 
 def carregar(pasta, excluir_fontes=(), sinalizadores=None):
     """
-    Devolve (classes, amostras); amostra = (pose, me, md, rótulo, duração_s, nome, sinalizador).
+    Devolve (classes, amostras); amostra = (sequência, rótulo, duração_s, nome, sinalizador),
+    sequência = dict com pose, mãos, rosto e expressão (ver comum.py).
     excluir_fontes: bases que ficam de fora (pelo prefixo "<fonte>__" do arquivo).
     Classes que ficarem sem nenhum vídeo não entram (não teriam como ser aprendidas).
     """
     sinalizadores = sinalizadores or {}
-    brutas = []
+    brutas, antigos = [], 0
     for classe in sorted(c for c in os.listdir(pasta) if os.path.isdir(os.path.join(pasta, c))):
         for nome in sorted(os.listdir(os.path.join(pasta, classe))):
             if not nome.endswith(".npz") or nome.split(SEP, 1)[0] in excluir_fontes:
                 continue
-            d = np.load(os.path.join(pasta, classe, nome))
-            pose, me, md = corrigir_aspecto(d["pose"], d["mao_esq"], d["mao_dir"],
-                                            float(d["largura"]), float(d["altura"]))
-            me, md = interpolar_lacunas(me), interpolar_lacunas(md)
-            pose = interpolar_lacunas(pose)
-            pose, me, md = recortar_sem_maos(pose, me, md)
-            pose, me, md = recortar_parado(pose, me, md)
-            brutas.append((pose, me, md, classe, len(pose) / float(d["fps"]),
+            seq, meta = carregar_npz(os.path.join(pasta, classe, nome))
+            antigos += meta["versao"] < VERSAO_CACHE
+            seq = limpar(seq, meta["largura"], meta["altura"])
+            seq = recortar_parado(recortar_sem_maos(seq))
+            brutas.append((seq, classe, len(seq["pose"]) / meta["fps"],
                            f"{classe}/{nome}", sinalizadores.get(os.path.splitext(nome)[0])))
-    classes = sorted({a[3] for a in brutas})
+    if antigos:
+        print(f"[aviso] {antigos} vídeos com cache antigo (versão < {VERSAO_CACHE}, sem rosto): "
+              f"treinam com o rosto 'ausente'. Rode o 1_extrair.py para atualizar.")
+    classes = sorted({a[1] for a in brutas})
     idx = {c: i for i, c in enumerate(classes)}
-    return classes, [(*a[:3], idx[a[3]], *a[4:]) for a in brutas]
+    return classes, [(a[0], idx[a[1]], *a[2:]) for a in brutas]
 
 
 def dividir(amostras, frac_val, val_sinalizadores=(), seed=0):
@@ -90,10 +91,10 @@ def dividir(amostras, frac_val, val_sinalizadores=(), seed=0):
     val_sin = set(val_sinalizadores)
     treino, val, por_classe = [], [], {}
     for i, a in enumerate(amostras):
-        if a[6] is not None:
-            (val if a[6] in val_sin else treino).append(i)
+        if a[4] is not None:
+            (val if a[4] in val_sin else treino).append(i)
         else:
-            por_classe.setdefault(a[3], []).append(i)
+            por_classe.setdefault(a[1], []).append(i)
     for idx in por_classe.values():
         rng.shuffle(idx)
         n_val = int(round(len(idx) * frac_val)) if len(idx) >= 2 else 0
@@ -106,53 +107,69 @@ def dividir(amostras, frac_val, val_sinalizadores=(), seed=0):
 # ----------------------------------------------------------------------------
 # Data augmentation — aplicada nos landmarks brutos, a cada época, aleatória
 # ----------------------------------------------------------------------------
-def espelhar(pose, me, md):
+def espelhar(seq):
     """
     Inverte x e troca esquerda<->direita. Em Libras isso equivale à pessoa
     canhota fazendo o sinal: mesmo significado, mão dominante trocada.
+    No rosto, troca também os pontos pareados (olho esq. <-> dir. etc.) e os blendshapes
+    "...Left" <-> "...Right": senão a imagem espelhada teria o sorriso do lado errado.
     """
-    pose, me, md = pose.copy(), me.copy(), md.copy()
-    for a in (pose, me, md):
-        a[..., 0] = -a[..., 0]
+    seq = {k: v.copy() for k, v in seq.items()}
+    for k in PONTOS:
+        seq[k][..., 0] = -seq[k][..., 0]
     for i, j in POSE_PARES:
-        pose[:, [i, j]] = pose[:, [j, i]]
-    return pose, md, me
+        seq["pose"][:, [i, j]] = seq["pose"][:, [j, i]]
+    for i, j in ROSTO_PARES:
+        seq["rosto"][:, [i, j]] = seq["rosto"][:, [j, i]]
+    seq["expressao"] = seq["expressao"][:, EXPRESSOES_ESPELHO]
+    seq["mao_esq"], seq["mao_dir"] = seq["mao_dir"], seq["mao_esq"]
+    return seq
 
 
-def aumentar(pose, me, md, rng):
+# Ruído (desvio padrão, em coordenadas de imagem) por parte: o tremor típico do detector.
+RUIDO = {"pose": 0.004, "mao_esq": 0.002, "mao_dir": 0.002, "rosto": 0.001}
+
+
+def aumentar(seq, rng):
     if rng.random() < 0.5:
-        pose, me, md = espelhar(pose, me, md)
+        seq = espelhar(seq)
 
     # Recorte temporal: na câmera a janela nunca pega o sinal perfeitamente
     # alinhado; treinar com pedaços de 75-100% do sinal ensina a tolerar isso.
-    T = len(pose)
+    T = len(seq["pose"])
     if T > 8:
         n = max(int(T * rng.uniform(0.75, 1.0)), 4)
         a = rng.randint(0, T - n)
-        pose, me, md = pose[a:a + n], me[a:a + n], md[a:a + n]
+        seq = fatiar(seq, a, a + n)
 
-    # Rotação leve, esticamento e ruído: variações de câmera, corpo e tremor.
+    # Rotação leve, esticamento e ruído: variações de câmera, corpo e tremor. A MESMA
+    # transformação em todas as partes, para a mão continuar no mesmo lugar do rosto.
     ang = np.deg2rad(rng.uniform(-12, 12))
     R = np.array([[np.cos(ang), -np.sin(ang)], [np.sin(ang), np.cos(ang)]], np.float32)
     S = np.diag([rng.uniform(0.9, 1.1), rng.uniform(0.9, 1.1)]).astype(np.float32)
     M = R @ S
-    centro = np.nanmean(pose[:, [11, 12], :2], axis=(0, 1))
+    centro = np.nanmean(seq["pose"][:, [11, 12], :2], axis=(0, 1))
     if np.isnan(centro).any():
         centro = np.array([0.5, 0.5], np.float32)
-    out = []
-    for arr, sigma in ((pose, 0.004), (me, 0.002), (md, 0.002)):
-        arr = arr.copy()
+    seq = dict(seq)
+    for k in PONTOS:
+        arr = seq[k].copy()
         arr[..., :2] = (arr[..., :2] - centro) @ M.T + centro
-        arr[..., :2] += np.random.normal(0, sigma, arr[..., :2].shape)
-        out.append(arr)
-    pose, me, md = out
+        arr[..., :2] += np.random.normal(0, RUIDO[k], arr[..., :2].shape)
+        seq[k] = arr
+    # Blendshapes: um pouco de ruído (a estimativa da expressão também oscila), mantendo 0 a 1.
+    seq["expressao"] = np.clip(seq["expressao"] + np.random.normal(0, 0.02, seq["expressao"].shape), 0, 1)
 
-    # Simula falhas de detecção: some com a mão em alguns frames aleatórios.
-    for mao in (me, md):
-        for t in range(len(mao)):
+    # Simula falhas de detecção: some com a mão (ou o rosto) em alguns frames aleatórios.
+    for k in ("mao_esq", "mao_dir"):
+        for t in range(len(seq[k])):
             if rng.random() < 0.05:
-                mao[t] = np.nan
-    return pose, me, md
+                seq[k][t] = np.nan
+    for t in range(len(seq["rosto"])):
+        if rng.random() < 0.03:
+            seq["rosto"][t] = np.nan
+            seq["expressao"][t] = np.nan
+    return seq
 
 
 class DatasetSinais(Dataset):
@@ -170,7 +187,7 @@ class DatasetSinais(Dataset):
         if aumentar_dados:
             por_classe = {}
             for i in indices:
-                por_classe.setdefault(amostras[i][3], []).append(i)
+                por_classe.setdefault(amostras[i][1], []).append(i)
             self.itens = [(tuple(v), k) for v in por_classe.values() for k in range(repeticoes)]
         else:
             self.itens = [((i,), 0) for i in indices]
@@ -181,10 +198,10 @@ class DatasetSinais(Dataset):
     def __getitem__(self, k):
         videos, j = self.itens[k]
         i = videos[j % len(videos)] if len(videos) <= self.alvo else self.rng.choice(videos)
-        pose, me, md, rotulo = self.amostras[i][:4]
+        seq, rotulo = self.amostras[i][:2]
         if self.aug:
-            pose, me, md = aumentar(pose, me, md, self.rng)
-        x = preparar_sequencia(pose, me, md)
+            seq = aumentar(seq, self.rng)
+        x = preparar_sequencia(seq)
         return torch.from_numpy(x), rotulo
 
 
@@ -278,16 +295,16 @@ def main():
 
     classes, amostras = carregar(args.landmarks, args.excluir_fontes,
                                  ler_sinalizadores(args.manifestos))
-    por_fonte = collections.Counter(a[5].split("/", 1)[1].split(SEP, 1)[0] for a in amostras)
+    por_fonte = collections.Counter(a[3].split("/", 1)[1].split(SEP, 1)[0] for a in amostras)
     print(f"{len(classes)} classes, {len(amostras)} vídeos {dict(por_fonte)}"
           + (f" | fora: {args.excluir_fontes}" if args.excluir_fontes else ""))
     treino, val = dividir(amostras, args.frac_val, args.val_sinalizadores)
-    vistos = {a[6] for a in amostras if a[6]}
+    vistos = {a[4] for a in amostras if a[4]}
     faltam = set(args.val_sinalizadores) - vistos
     if faltam:
         print(f"[aviso] sinalizadores de validação sem nenhum vídeo: {sorted(faltam)}")
     # Grupos de validação, na ordem de `val` (= ordem do dl_val, que não embaralha).
-    tem_sin = np.array([amostras[i][6] is not None for i in val], bool)
+    tem_sin = np.array([amostras[i][4] is not None for i in val], bool)
     grupos = {f"pessoas novas {sorted(set(args.val_sinalizadores) & vistos)}": tem_sin,
               "outros (gravação nova, sem id de pessoa)": ~tem_sin,
               "total": np.ones(len(val), bool)}
@@ -323,7 +340,7 @@ def main():
     # ficava sendo um modelo das primeiras épocas, quase sem treino. A perda é contínua e também
     # melhora quando a probabilidade do certo sobe, o que importa para o limiar da câmera.
     melhor, sem_melhora = float("inf"), 0
-    duracao_janela = float(np.median([a[4] for a in amostras]))
+    duracao_janela = float(np.median([a[2] for a in amostras]))
     t_inicio = time.time()
     for ep in range(1, args.epocas + 1):
         t_ep = time.time()

@@ -102,6 +102,10 @@ def main():
     ap.add_argument("--origem-rgbd", default=FONTES["rgbd"][1], help="pasta extraída do pacote Kinect")
     ap.add_argument("--copiar", action="store_true",
                     help="copia os vídeos em vez de criar links simbólicos (~85 GB a mais em disco)")
+    ap.add_argument("--modo", choices=["link", "copiar", "mover"], default=None,
+                    help="link (padrão: origem compartilhada intacta), copiar, ou mover (para vídeos "
+                         "baixados só para este projeto, ex.: pelo preparacao/baixar_videos.py; no "
+                         "Windows, link simbólico exige permissão de administrador)")
     ap.add_argument("--executar", action="store_true", help="cria os links/cópias (sem isso: dry run)")
     ap.add_argument("--remover-orfaos", action="store_true",
                     help="apaga vídeos desta base na pasta unificada que o plano atual não gera")
@@ -117,7 +121,7 @@ def main():
         if estranhos:
             print(f"[atenção] {fonte}: {len(estranhos)} arquivos fora do padrão ignorados: {estranhos[:5]}")
         organizar(fonte, itens, executar=args.executar, remover_orfaos=args.remover_orfaos,
-                  modo="copiar" if args.copiar else "link")
+                  modo=args.modo or ("copiar" if args.copiar else "link"))
 
 
 if __name__ == "__main__":
