@@ -20,9 +20,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from comum import (EXPRESSOES_ESPELHO, N_FEATURES, PONTOS, POSE_PARES, ROSTO_PARES,
-                   VERSAO_CACHE, ModeloSinais, carregar_npz, fatiar, limpar,
-                   preparar_sequencia, recortar_parado, recortar_sem_maos)
+from comum import (CLASSES_ATIVAS, EXPRESSOES_ESPELHO, N_FEATURES, PONTOS, POSE_PARES,
+                   ROSTO_PARES, VERSAO_CACHE, ModeloSinais, carregar_npz, fatiar,
+                   ler_classes_ativas, limpar, preparar_sequencia, recortar_parado,
+                   recortar_sem_maos)
 
 SEP = "__"   # dados/landmarks/<classe>/<fonte>__<id>.npz (ver preparacao/base_unificada.py)
 
@@ -48,16 +49,18 @@ def ler_sinalizadores(pasta_manifestos):
     return mapa
 
 
-def carregar(pasta, excluir_fontes=(), sinalizadores=None):
+def carregar(pasta, excluir_fontes=(), sinalizadores=None, ativas=None):
     """
     Devolve (classes, amostras); amostra = (sequência, rótulo, duração_s, nome, sinalizador),
     sequência = dict com pose, mãos, rosto e expressão (ver comum.py).
     excluir_fontes: bases que ficam de fora (pelo prefixo "<fonte>__" do arquivo).
+    ativas: conjunto de classes a usar (None = todas as pastas).
     Classes que ficarem sem nenhum vídeo não entram (não teriam como ser aprendidas).
     """
     sinalizadores = sinalizadores or {}
     brutas, antigos = [], 0
-    for classe in sorted(c for c in os.listdir(pasta) if os.path.isdir(os.path.join(pasta, c))):
+    for classe in sorted(c for c in os.listdir(pasta) if os.path.isdir(os.path.join(pasta, c))
+                         and (ativas is None or c in ativas)):
         for nome in sorted(os.listdir(os.path.join(pasta, classe))):
             if not nome.endswith(".npz") or nome.split(SEP, 1)[0] in excluir_fontes:
                 continue
@@ -102,6 +105,50 @@ def dividir(amostras, frac_val, val_sinalizadores=(), seed=0):
         val += idx[:n_val]
         treino += idx[n_val:]
     return treino, val
+
+
+def dividir_fixo(amostras, n_treino, val_sinalizadores=(), seed=0):
+    """
+    Exatamente `n_treino` vídeos de cada classe no treino; TODO o resto vai para o teste.
+
+    Por que fixar o número de vídeos? O DatasetSinais já sorteia o mesmo número de amostras por
+    classe a cada época, mas uma classe com 60 vídeos ainda mostra mais VARIEDADE (pessoas,
+    repetições) que uma com 50. Com o mesmo n de vídeos, nenhuma classe fica mais "bem ensinada"
+    só por ter mais dados.
+
+    Quem sai do treino, em ordem:
+      1) as pessoas de `val_sinalizadores`, inteiras: o teste tem que ter alguém que o modelo
+         nunca viu, senão mede só se ele reconhece de novo quem já conhece;
+      2) se ainda sobrar mais que `n_treino`, sai 1 vídeo por vez da pessoa com MAIS vídeos
+         daquela classe no treino (tira repetições, não pessoas, e mantém o treino equilibrado
+         entre os sinalizantes). Vídeos sem sinalizador (Incluir) ou de base com poucos vídeos por
+         pessoa (V-LIBRASIL, 1 por palavra) só saem se não houver outra opção: cada um é uma
+         pessoa a mais no treino.
+    Classe com menos de `n_treino` vídeos fora das pessoas de teste fica com o que tiver (aviso).
+    """
+    rng = random.Random(seed)
+    val_sin = set(val_sinalizadores)
+    treino, teste, por_classe = [], [], collections.defaultdict(list)
+    for i, a in enumerate(amostras):
+        (teste if a[4] in val_sin else por_classe[a[1]]).append(i)
+    curtas = []
+    for c, idx in sorted(por_classe.items()):
+        rng.shuffle(idx)
+        while len(idx) > n_treino:
+            # Conta os vídeos de cada pessoa no treino; sem id = pessoa única (nunca a "maior").
+            cont = collections.Counter(amostras[i][4] for i in idx if amostras[i][4])
+            maior = max(cont, key=lambda s: (cont[s], s)) if cont else None
+            if maior is None or cont[maior] <= 1:
+                teste.append(idx.pop())              # só restam pessoas com 1 vídeo cada
+                continue
+            j = next(k for k, i in enumerate(idx) if amostras[i][4] == maior)
+            teste.append(idx.pop(j))
+        if len(idx) < n_treino:
+            curtas.append((c, len(idx)))
+        treino += idx
+    if curtas:
+        print(f"[aviso] classes com menos de {n_treino} vídeos no treino: {curtas}")
+    return treino, teste
 
 
 # ----------------------------------------------------------------------------
@@ -271,7 +318,9 @@ def main():
                     help="amostras aumentadas de CADA CLASSE por época (teto, igual para todas)")
     ap.add_argument("--manifestos", default="dados/manifestos",
                     help="de onde vem a coluna 'sinalizador' usada na validação por pessoa")
-    ap.add_argument("--val-sinalizadores", nargs="*", default=["minds_11", "minds_12"],
+    # Só uma pessoa: com 50 vídeos por classe no treino, tirar 2 pessoas (10 vídeos) deixaria as
+    # classes de 55 vídeos com 45.
+    ap.add_argument("--val-sinalizadores", nargs="*", default=["minds_12"],
                     help="pessoas que ficam SÓ na validação (nunca vistas no treino)")
     ap.add_argument("--excluir-fontes", nargs="*", default=["minds_libras_rgbd"],
                     help="bases fora do treino (padrão: Kinect, adiado; passe a flag vazia p/ incluir)")
@@ -280,6 +329,11 @@ def main():
     ap.add_argument("--workers", type=int, default=min(8, max(0, (os.cpu_count() or 1) - 1)),
                     help="processos preparando dados em paralelo (0 = no processo principal)")
     ap.add_argument("--dispositivo", default="auto", help="auto, cuda ou cpu")
+    ap.add_argument("--classes", default=CLASSES_ATIVAS,
+                    help='arquivo com as classes a treinar ("" = todas as pastas de --landmarks)')
+    ap.add_argument("--videos-por-classe", type=int, default=50,
+                    help="exatamente N vídeos por classe no treino, o resto vai para o teste "
+                         "(0 = divisão antiga: --val-sinalizadores + --frac-val)")
     args = ap.parse_args()
     torch.manual_seed(0); np.random.seed(0); random.seed(0)
 
@@ -293,23 +347,32 @@ def main():
           + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else "")
           + f" | workers: {args.workers}")
 
+    ativas = ler_classes_ativas(args.classes)
     classes, amostras = carregar(args.landmarks, args.excluir_fontes,
-                                 ler_sinalizadores(args.manifestos))
+                                 ler_sinalizadores(args.manifestos), ativas)
+    if ativas is not None and set(ativas) - set(classes):
+        print(f"[aviso] classes de {args.classes} sem nenhum vídeo no cache: "
+              f"{sorted(set(ativas) - set(classes))}")
     por_fonte = collections.Counter(a[3].split("/", 1)[1].split(SEP, 1)[0] for a in amostras)
     print(f"{len(classes)} classes, {len(amostras)} vídeos {dict(por_fonte)}"
           + (f" | fora: {args.excluir_fontes}" if args.excluir_fontes else ""))
-    treino, val = dividir(amostras, args.frac_val, args.val_sinalizadores)
+    if args.videos_por_classe > 0:
+        treino, val = dividir_fixo(amostras, args.videos_por_classe, args.val_sinalizadores)
+    else:
+        treino, val = dividir(amostras, args.frac_val, args.val_sinalizadores)
     vistos = {a[4] for a in amostras if a[4]}
     faltam = set(args.val_sinalizadores) - vistos
     if faltam:
         print(f"[aviso] sinalizadores de validação sem nenhum vídeo: {sorted(faltam)}")
     # Grupos de validação, na ordem de `val` (= ordem do dl_val, que não embaralha).
-    tem_sin = np.array([amostras[i][4] is not None for i in val], bool)
-    grupos = {f"pessoas novas {sorted(set(args.val_sinalizadores) & vistos)}": tem_sin,
-              "outros (gravação nova, sem id de pessoa)": ~tem_sin,
+    nova = np.array([amostras[i][4] in set(args.val_sinalizadores) for i in val], bool)
+    grupos = {f"pessoas novas {sorted(set(args.val_sinalizadores) & vistos)}": nova,
+              "outros (pessoa vista no treino ou sem id)": ~nova,
               "total": np.ones(len(val), bool)}
-    print(f"Treino: {len(treino)} vídeos | validação: {len(val)} "
-          f"({tem_sin.sum()} de pessoas novas, {(~tem_sin).sum()} outros)")
+    por_classe_treino = collections.Counter(amostras[i][1] for i in treino)
+    print(f"Treino: {len(treino)} vídeos ({min(por_classe_treino.values())}–"
+          f"{max(por_classe_treino.values())} por classe) | validação/teste: {len(val)} "
+          f"({nova.sum()} de pessoas novas, {(~nova).sum()} outros)")
     if not val:
         print("[aviso] nenhuma classe tem 2+ vídeos: sem validação. A acurácia de "
               "treino NÃO diz se o modelo generaliza. Grave mais vídeos por classe.")

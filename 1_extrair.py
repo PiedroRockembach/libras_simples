@@ -24,7 +24,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import cv2
 import numpy as np
 
-from comum import VERSAO_CACHE, ExtratorLandmarks, baixar_modelos, empilhar
+from comum import (CLASSES_ATIVAS, VERSAO_CACHE, ExtratorLandmarks, baixar_modelos, empilhar,
+                   ler_classes_ativas)
 
 EXTENSOES = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 SEP = "__"
@@ -100,12 +101,15 @@ def main():
     # O MediaPipe já usa algumas threads por processo: metade dos núcleos evita
     # que os processos fiquem disputando a CPU.
     ap.add_argument("--processos", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    ap.add_argument("--classes", default=CLASSES_ATIVAS,
+                    help='arquivo com as classes a extrair ("" = todas as pastas de --videos)')
     args = ap.parse_args()
+    ativas = ler_classes_ativas(args.classes)
 
     tarefas, desatualizados = [], 0
     for classe in sorted(os.listdir(args.videos)):
         pasta = os.path.join(args.videos, classe)
-        if not os.path.isdir(pasta):
+        if not os.path.isdir(pasta) or (ativas is not None and classe not in ativas):
             continue
         for nome in sorted(os.listdir(pasta)):
             if not nome.lower().endswith(EXTENSOES):

@@ -30,6 +30,17 @@ MAX_LACUNA = 6         # buracos de detecção de até 6 frames são interpolado
 # Versão do cache de landmarks (dados/landmarks/*.npz). Suba quando mudar O QUE o MediaPipe
 # salva: o 1_extrair.py re-extrai os arquivos de versão menor. 1 = pose+mãos; 2 = + rosto.
 VERSAO_CACHE = 2
+# Vocabulário ativo: só estas classes são extraídas e treinadas (ver o próprio arquivo).
+CLASSES_ATIVAS = "classes_ativas.txt"
+
+
+def ler_classes_ativas(caminho=CLASSES_ATIVAS):
+    """Conjunto de classes do arquivo (uma por linha, # = comentário). Caminho vazio = None (todas)."""
+    if not caminho:
+        return None
+    with open(caminho, encoding="utf-8") as f:
+        return {l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")}
+
 
 # Pontos da pose que usamos: nariz, ombros, cotovelos, punhos.
 # Pernas e quadril não dizem nada sobre o sinal e só adicionam ruído.

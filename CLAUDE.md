@@ -200,6 +200,21 @@ vídeo em `dados/brutos/_logs/<fonte>.csv`. Dry run por padrão; idempotente; `-
   depois de 4 predições iguais seguidas com confiança ≥ `--limiar` (0.7); o buffer é limpo
   ao aceitar. Classes com `_` no nome (ex.: `_nada`) são treinadas, mas nunca exibidas.
 
+## Branch `testes`: vocabulário de 20 classes (decisão do usuário, 2026-11-26)
+Nesta branch só os **20 sinais do MINDS** são usados, as únicas classes com volume real (55–65
+vídeos de 11–16 pessoas somando as 3 bases; a 21ª classe tem 6). A lista fica em
+[classes_ativas.txt](classes_ativas.txt), lida por `ler_classes_ativas()` (`comum.py`) no
+`1_extrair.py` e no `2_treinar.py` (`--classes`, padrão = esse arquivo; `--classes ""` = todas).
+O `3_tempo_real.py` não muda: usa as classes gravadas no modelo. Os vídeos do MINDS precisam estar
+na máquina (`baixar_videos.py --fontes minds_libras_rgb`); sem eles sobram 13 classes com 31 vídeos.
+- **Exatamente 50 vídeos por classe no treino, o resto é teste** (decisão do usuário, 2026-11-26):
+  `dividir_fixo()`, `--videos-por-classe 50` (0 = divisão antiga). Sai primeiro a pessoa de teste
+  inteira (`--val-sinalizadores`, agora só `minds_12`: com 2 pessoas, classes de 55 vídeos ficariam
+  com 45), depois 1 repetição por vez da pessoa do MINDS com mais vídeos na classe; Incluir e
+  V-LIBRASIL ficam no treino (cada vídeo é uma pessoa a mais). Simulado pelos manifestos: treino
+  1000 (50 x 20), teste 189 = 100 de `minds_12` (pessoa nova) + 89 repetições de pessoas do treino.
+  O teste também escolhe o checkpoint (early stopping pela perda), o que deixa o número um pouco otimista.
+
 ## ⚠️ Problema em aberto: 1069 classes, quase todas com 1 vídeo
 O pipeline atual foi pensado para poucas classes com vários vídeos. Com ~1 exemplo por
 classe:

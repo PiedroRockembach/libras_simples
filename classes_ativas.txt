@@ -1,0 +1,25 @@
+# Vocabulário ativo desta branch (decisão de 2026-11-26): os 20 sinais do MINDS-Libras, as únicas
+# classes com muitos exemplos e muitas pessoas (55-65 vídeos de 11-16 pessoas, somando as 3 bases).
+# O 1_extrair.py e o 2_treinar.py só usam as classes listadas aqui; o 3_tempo_real.py usa as do
+# modelo. Uma classe por linha, com o nome da pasta em dados/videos/. Linhas com # são ignoradas.
+# Para voltar a usar todas as classes: --classes "" nos dois scripts.
+5
+acontecer
+aluno
+amarelo
+américa
+aproveitar
+bala
+banco
+banheiro
+barulho
+conhecer
+espelho
+esquina
+filho
+maçã
+medo
+ruim
+sapo
+vacina
+vontade
