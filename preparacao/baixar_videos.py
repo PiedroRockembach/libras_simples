@@ -17,10 +17,16 @@ FONTES (o que cada uma baixa, de onde e para onde)
                       download interrompido, confere o MD5 e extrai SÓ os vídeos RGB que o adaptador
                       reconhece (profundidade/esqueleto do Kinect ficam de fora). O zip é apagado depois
                       de extraído (--manter-zips para guardar).
-  catalogo            os links com status "baixar" de dados/catalogo_treino.csv (fontes do MALTA-LIBRAS
-                      e V-LIBRASIL) -> dados/brutos/<fonte>/<nome do arquivo no link>. Também dá para
-                      pedir uma fonte só: malta_acessibilidade_v3, malta_spreadthesign,
-                      malta_ufsc_signbank, malta_ufv, malta_usp, vlibrasil.
+  vlibrasil           Kaggle davimedio01/v-librasil (cópia completa do V-LIBRASIL da UFPE, ~10,9 GB),
+                      via kagglehub (pip install kagglehub; dataset público, não precisa de login)
+                      -> dados/brutos/vlibrasil/videos UFPE (V-LIBRASIL)/{data/*.mp4, annotations.csv}.
+                      O site da UFPE (fonte dos links do catálogo) ficou fora do ar em 2026-11. Manual:
+                      curl -L -o v-librasil.zip https://www.kaggle.com/api/v1/datasets/download/davimedio01/v-librasil
+                      e extrair o zip em dados/brutos/vlibrasil/.
+  catalogo            os links com status "baixar" de dados/catalogo_treino.csv (fontes do MALTA-LIBRAS)
+                      -> dados/brutos/<fonte>/<nome do arquivo no link>. Também dá para pedir uma fonte
+                      só: malta_acessibilidade_v3, malta_spreadthesign, malta_ufsc_signbank, malta_ufv,
+                      malta_usp. (O V-LIBRASIL vem do Kaggle, acima, e não dos links da UFPE.)
 
 POR QUE ASSIM
   - Idempotente: o que já está baixado (ou já organizado em dados/videos/) é pulado; um download
@@ -69,8 +75,12 @@ CATALOGO = os.path.join(DADOS, "catalogo_treino.csv")
 USER_AGENT = "Mozilla/5.0 (compatible; libras-pesquisa-academica/1.0)"
 ZENODO = {"minds_libras_rgb": ("2667329", "rgb"), "minds_libras_rgbd": ("4322984", "rgbd")}
 FONTES_CATALOGO = ["malta_acessibilidade_v3", "malta_spreadthesign", "malta_ufsc_signbank",
-                   "malta_ufv", "malta_usp", "vlibrasil"]
-TODAS = ["incluir_tecnologia", *ZENODO, "catalogo"]
+                   "malta_ufv", "malta_usp"]
+KAGGLE_VLIBRASIL = "davimedio01/v-librasil"
+PASTA_VLIBRASIL = os.path.join(BRUTOS, "vlibrasil")
+BYTES_VLIBRASIL = 10_853_185_748                  # tamanho informado pela API do Kaggle (2026-11-24)
+N_VIDEOS_VLIBRASIL = 4086                         # 4089 da UFPE menos os 3 do error.csv
+TODAS = ["incluir_tecnologia", *ZENODO, "vlibrasil", "catalogo"]
 # YouTube: só vídeo (sem áudio = sem precisar juntar trilhas), mp4 até 1080p; senão o melhor que houver.
 FORMATO_YT = "bv*[ext=mp4][height<=1080]/bv*[height<=1080]/b[height<=1080]/b"
 POR_SITE = 2                       # conexões simultâneas por site
@@ -307,6 +317,34 @@ def baixar_minds(fonte, falta, manter_zips):
     return executar_lote(fonte, falta, um, 1, lambda z: {"zip": z["nome"], "md5": z["md5"]})
 
 
+# ----------------------------------------------------------------------------- V-LIBRASIL (Kaggle)
+def vlibrasil_presentes():
+    """Quantos vídeos do V-LIBRASIL já existem: em dados/brutos ou já organizados em dados/videos."""
+    brutos = sum(1 for r, _, fs in os.walk(PASTA_VLIBRASIL) for f in fs if f.endswith(".mp4"))
+    org = 0
+    p = os.path.join(PASTA_MANIFESTOS, "vlibrasil.csv")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            org = sum(1 for r in csv.DictReader(f)
+                      if r["arquivo"] and os.path.isfile(os.path.join(PASTA_VIDEOS, r["arquivo"])))
+    return brutos + org
+
+
+def baixar_vlibrasil():
+    """Baixa e extrai o dataset inteiro do Kaggle em dados/brutos/vlibrasil (um zip só)."""
+    try:
+        import kagglehub
+    except ImportError:
+        sys.exit("[erro] o V-LIBRASIL vem do Kaggle e precisa do kagglehub: pip install kagglehub")
+    os.makedirs(PASTA_VLIBRASIL, exist_ok=True)
+    caminho = kagglehub.dataset_download(KAGGLE_VLIBRASIL, output_dir=PASTA_VLIBRASIL)
+    n = vlibrasil_presentes()
+    escrever_log("vlibrasil", [{"origem": f"kaggle:{KAGGLE_VLIBRASIL}", "pasta": caminho, "videos": n,
+                                "status": "ok" if n >= N_VIDEOS_VLIBRASIL else "incompleto"}])
+    print(f"  [vlibrasil] {n} vídeos em {caminho}")
+    return (1, 0) if n >= N_VIDEOS_VLIBRASIL else (0, 1)
+
+
 # ----------------------------------------------------------------------------- catálogo (links)
 def nome_do_link(link):
     """Nome do arquivo no link (único dentro de cada fonte, conferido em 2026-11-18)."""
@@ -376,8 +414,11 @@ def organizar(fontes):
                         "--origem-rgb", os.path.join(BRUTOS, "minds_libras_rgb", "extracted"),
                         "--origem-rgbd", os.path.join(BRUTOS, "minds_libras_rgbd", "extracted"),
                         "--modo", "mover", "--executar"], check=True)
+    if "vlibrasil" in fontes and os.path.isdir(PASTA_VLIBRASIL):
+        subprocess.run([py, os.path.join(AQUI, "vlibrasil_pre_tratamento.py"),
+                        "--origem", PASTA_VLIBRASIL, "--executar"], check=True)
     if any(f in fontes for f in FONTES_CATALOGO):
-        print("[aviso] as fontes do catálogo (MALTA-LIBRAS, V-LIBRASIL) ainda não têm adaptador: os vídeos "
+        print("[aviso] as fontes do MALTA-LIBRAS ainda não têm adaptador: os vídeos "
               f"ficam em {BRUTOS}/<fonte>/ até a integração em dados/videos/ ser implementada.")
 
 
@@ -417,6 +458,14 @@ def main():
             est = sum(z["bytes"] for z in falta)
             total += est
             print(f"{fonte} (Zenodo {ZENODO[fonte][0]}): {len(falta)} zips a baixar ({mb(est)}), {ja} já extraídos")
+    if "vlibrasil" in fontes:
+        ja = vlibrasil_presentes()
+        planos["vlibrasil"] = ja < N_VIDEOS_VLIBRASIL
+        if planos["vlibrasil"]:
+            total += BYTES_VLIBRASIL
+        print(f"vlibrasil (Kaggle {KAGGLE_VLIBRASIL}): "
+              + (f"dataset inteiro a baixar ({mb(BYTES_VLIBRASIL)}; {ja} vídeos já presentes)"
+                 if planos["vlibrasil"] else f"completo ({ja} vídeos)"))
     cat = [f for f in FONTES_CATALOGO if f in fontes]
     if cat:
         falta, ja = plano_catalogo(cat)
@@ -426,7 +475,10 @@ def main():
 
     if args.limite is not None:
         for k, v in planos.items():
-            planos[k] = (v[0][:args.limite], v[1]) if k == "incluir_tecnologia" else v[:args.limite]
+            if k == "incluir_tecnologia":
+                planos[k] = (v[0][:args.limite], v[1])
+            elif k != "vlibrasil":                    # o Kaggle entrega um zip só: não dá para limitar
+                planos[k] = v[:args.limite]
         print(f"(--limite {args.limite}: no máximo {args.limite} itens por fonte)")
 
     os.makedirs(BRUTOS, exist_ok=True)
@@ -446,6 +498,8 @@ def main():
     for fonte in ZENODO:
         if planos.get(fonte):
             resumo[fonte] = baixar_minds(fonte, planos[fonte], args.manter_zips)
+    if planos.get("vlibrasil"):
+        resumo["vlibrasil"] = baixar_vlibrasil()
     for f in cat:
         if planos.get(f):
             resumo[f] = baixar_catalogo(f, planos[f], args.paralelo)

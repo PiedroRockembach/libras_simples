@@ -56,6 +56,26 @@ recortados); `rgbd` = só o RGB do Kinect (1200 vídeos de 5 s fixos; Depth/Body
   (acontecer, aluno, banco, barulho, esquina, medo, sapo, vacina, vontade).
 - `organizar(..., modo=)` em `base_unificada.py`: `mover` (padrão, Incluir), `copiar` ou `link`.
 
+**vlibrasil**: V-LIBRASIL (Rodrigues e Zanchettin, CIn-UFPE, 2021), 1364 palavras x 3 articuladores
+(4086 vídeos, chroma key, 1080p, 30/60 fps). **Fonte: cópia do Kaggle `davimedio01/v-librasil`**
+(decisão do usuário, 2026-11-24; o site da UFPE ficou fora do ar; o IEEE DataPort exige assinatura).
+Licença declarada no Kaggle: CC BY-NC-ND 4.0; os termos originais proíbem redistribuir e uso
+comercial (dados fora do git). Adaptador [preparacao/vlibrasil_pre_tratamento.py](preparacao/vlibrasil_pre_tratamento.py):
+- **Classe pelo catálogo**: o `annotations.csv` do Kaggle traz o `url_download` original da UFPE,
+  o mesmo link do `catalogo_treino.csv`; o adaptador usa a classe que o catálogo decidiu. As ~203
+  palavras ambíguas (várias formas conhecidas) ficam em `dados/brutos/vlibrasil`.
+- **Sinalizador = articulador** (`vlibrasil_1..3`, do nome do arquivo); id = nome do vídeo na UFPE.
+- Nomes de arquivo trocam `? \ "` por U+F03F/U+F05C/U+F022 (faixa privada); o adaptador desfaz.
+- **Câmera lenta**: exportado a metade da velocidade (dissertação, p. 57). Medido: punhos ~2,7x
+  mais lentos que na Incluir nas mesmas 12 palavras; com o `PASSO_FRAMES = {"vlibrasil": 2}` do
+  `1_extrair.py` (1 de cada 2 frames, mesmo fps), cai para ~1,4x (ritmo dos intérpretes). Corrigir
+  só o fator documentado (2x) foi decisão consciente: o resto varia por palavra (1,8x a 4,4x).
+- Organizado em 2026-11-24: **3481 vídeos, 1161 classes** (203 somadas a classes existentes). A
+  coluna `fps` do `annotations.csv` é o nº de frames, não fps. Faltam 3 vídeos (`error.csv`).
+- Grafias unidas no `UNIR` ao integrar: `côco`→`coco` (classe da Incluir renomeada; cache movido),
+  `melância`→`melancia`, `volêi`→`vôlei`, `comemorar (celebrar)`→`comemorar - celebrar`.
+  `secretária` x `secretaria` ficam separadas (palavras diferentes; o aviso de duplicata é esperado).
+
 ### Catálogo unificado de treino (MALTA-LIBRAS + V-LIBRASIL, 2026-11-18)
 [preparacao/catalogo_unificado.py](preparacao/catalogo_unificado.py) gera `dados/catalogo_treino.csv`:
 uma linha por vídeo (nossos + fontes do repositório `../ISLR_LIBRAS`, do Malta Lab), só com as
@@ -108,6 +128,7 @@ python preparacao/baixar_videos.py --executar --organizar
 # ...ou, com os pacotes já em disco:
 python preparacao/incluir_tecnologia_pre_tratamento.py --origem incluir_tecnologia.tar.gz --executar
 python preparacao/minds_libras_pre_tratamento.py --executar
+python preparacao/vlibrasil_pre_tratamento.py --executar      # depois do catálogo (usa as classes dele)
 python 1_extrair.py --videos dados/videos --saida dados/landmarks
 python 2_treinar.py --landmarks dados/landmarks
 python 3_tempo_real.py --modelo modelo_sinais.pt
@@ -123,16 +144,20 @@ vídeo em `dados/brutos/_logs/<fonte>.csv`. Dry run por padrão; idempotente; `-
   4322984: 12 zips, 29 GB). Retoma downloads (HTTP Range), confere MD5, extrai **só** os vídeos RGB
   que o adaptador reconhece (usa os mesmos padrões `PADRAO_RGB/RGBD`) e apaga o zip
   (`--manter-zips`). Marcador `zips/<zip>.ok` evita baixar de novo.
-- `catalogo` (ou uma fonte só): links `status=baixar` do `dados/catalogo_treino.csv`; nome do
+- `vlibrasil`: **kagglehub** (`davimedio01/v-librasil`, público, sem login), dataset inteiro
+  (~10,9 GB, ~7 min a ~28 MB/s em 2026-11-24) em `dados/brutos/vlibrasil/`. Manual: `curl -L -o
+  v-librasil.zip https://www.kaggle.com/api/v1/datasets/download/davimedio01/v-librasil`.
+- `catalogo` (ou uma fonte só, só MALTA): links `status=baixar` do `dados/catalogo_treino.csv`; nome do
   arquivo = o do link (único por fonte). **Ainda sem adaptador** para `dados/videos/`.
-- `--organizar` chama os adaptadores: Incluir (move) e MINDS com `--modo mover` (opção nova do
+- `--organizar` chama os adaptadores: Incluir (move), V-LIBRASIL (move) e MINDS com `--modo mover` (opção nova do
   adaptador; no Windows, link simbólico exige administrador).
 - Rede: verificação SSL pelo sistema operacional via **truststore** (o SignBank da UFSC não envia
   o certificado intermediário: o Python puro falha). No máx. 2 conexões por site; "disjuntor": 5
   falhas seguidas num site pulam o resto dele (rodar de novo tenta só o que faltou).
 - Testado em 2026-11-18 (cópia isolada): YouTube, Acessibilidade v3, Spread the Sign, UFV e
   SignBank ok; retomada + MD5 ok; Zenodo aceita Range; extração seletiva ok. **Fora do ar nesse
-  dia**: V-LIBRASIL (502 até na página inicial) e USP (handshake TLS sem resposta).
+  dia**: site do V-LIBRASIL (502 até na página inicial; por isso o Kaggle) e USP (handshake TLS
+  sem resposta).
 
 ## Decisões já tomadas (e por quê)
 - **MediaPipe com a API Tasks** (`HandLandmarker` + `PoseLandmarker` + `FaceLandmarker`, modo VIDEO).
@@ -159,6 +184,8 @@ vídeo em `dados/brutos/_logs/<fonte>.csv`. Dry run por padrão; idempotente; `-
   - espelhamento troca também os pontos pareados do rosto e os blendshapes `...Left`/`...Right`;
   - limitação: a distância mão-rosto é 2D, então mão NA FRENTE do rosto conta como "encostando";
   - x multiplicado pela razão de aspecto; mãos em slots fixos (esq/dir);
+  - bases em câmera lenta: `PASSO_FRAMES` no `1_extrair.py` (V-LIBRASIL: 1 de cada 2 frames;
+    campo `passo` no .npz). A correção fica na extração: treino e câmera não mudam;
   - lacunas de detecção de até 6 frames são interpoladas; o início e o fim sem mãos são recortados
     (`recortar_sem_maos`) e depois o início e o fim **parados** (`recortar_parado`: velocidade dos
     punhos da pose em larguras de ombro, piso 0,01, mantém 5–95% do movimento acumulado). O

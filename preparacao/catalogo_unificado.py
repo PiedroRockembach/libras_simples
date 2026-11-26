@@ -12,7 +12,9 @@ FONTES
     malta_ufsc_corpus, malta_ufsc_signbank, malta_ufv, malta_usp. O dicionário "Youtube" do MALTA
     é a NOSSA Incluir Tecnologia: não entra de novo (seria duplicata e vazaria entre treino e
     validação), mas é usado para descobrir a variante e o sinalizante dos nossos vídeos.
-  V-LIBRASIL (UFPE): links_videos_vlibrasil.csv; ~3 sinalizantes por sinal (identidade desconhecida).
+  V-LIBRASIL (UFPE): links_videos_vlibrasil.csv; 3 articuladores por sinal. Depois de organizado pelo
+    preparacao/vlibrasil_pre_tratamento.py (vídeos do Kaggle), o manifesto dados/manifestos/vlibrasil.csv
+    dá o arquivo local e o articulador (sinalizador vlibrasil_<N>) de cada link.
 
 POR QUE CADA REGRA (foco: qualidade do reconhecimento, e o máximo de classes que ela permitir)
   - Rótulo = coluna `checked` do MALTA, NÃO `lemma`: a `lemma` é de um lematizador automático e erra
@@ -215,6 +217,10 @@ def main():
 
     # ------------------------------------------------------------ 4) V-LIBRASIL
     ambiguas_vl = collections.Counter()
+    # Vídeos já organizados pelo preparacao/vlibrasil_pre_tratamento.py (casados pelo link da UFPE):
+    # ficam "local", com o articulador como sinalizador.
+    p = os.path.join(PASTA_MANIFESTOS, "vlibrasil.csv")
+    vl_local = {x["url_download"]: x for x in ler_csv(p) if x["arquivo"]} if os.path.exists(p) else {}
     for x in ler_csv(os.path.join(args.islr, "video_downloads", "links_videos_vlibrasil.csv")):
         w = norm(x["sign"])
         if not w:
@@ -228,8 +234,11 @@ def main():
             classe, var, origem = nome_classe(w, next(iter(grupos_malta[w]))), next(iter(grupos_malta[w])), "inferida_unica"
         else:
             classe, var, origem = w, "", "propria" if w not in classes_nossas else "inferida_unica"
+        loc = vl_local.get(x["link"])
         externos.append({"classe": classe, "fonte": "vlibrasil", "dicionario": "V-LIBRASIL",
-                         "sinalizador": "", "status": "baixar", "arquivo_local": "",
+                         "sinalizador": loc["sinalizador"] if loc else "",
+                         "status": "local" if loc else "baixar",
+                         "arquivo_local": f"dados/videos/{loc['arquivo']}" if loc else "",
                          "link": x["link"], "rotulo_original": x["sign"], "palavra": w,
                          "variante_malta": var, "origem_variante": origem})
 
@@ -260,7 +269,7 @@ def main():
         n = len(ids)
         if any(v["fonte"] == "incluir_tecnologia" and not v["sinalizador"] for v in ok) and not ids & ATORES_INCLUIR:
             n += 1                                     # Incluir sem par: conta 1 se nenhum ator do canal
-        n += min(3, sum(v["fonte"] == "vlibrasil" for v in ok))
+        n += min(3, sum(v["fonte"] == "vlibrasil" and not v["sinalizador"] for v in ok))  # sem id: 1 por vídeo
         return len(ex), len(ex_sem_vl), n, len(ok)
 
     stats = {c: contar(v) for c, v in por_classe.items()}

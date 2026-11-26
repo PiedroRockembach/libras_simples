@@ -62,6 +62,30 @@ sinal é uma pessoa: se forem, a regra entra na lista `UNIR`. A mesma cautela va
 para as variantes: `feliz (1)` de uma base não é necessariamente o mesmo sinal que
 `feliz (1)` de outra, porque a numeração é de cada base.
 
+### Base incluída: V-LIBRASIL, e a armadilha da câmera lenta
+
+O V-LIBRASIL (UFPE) tem 1.364 palavras, cada uma sinalizada por 3 pessoas (os
+"articuladores"). Os vídeos vêm de uma cópia no Kaggle, e o nome de cada arquivo diz
+quem sinaliza. Isso permite validar com uma pessoa que o modelo nunca viu.
+
+A dissertação que criou a base conta que os vídeos foram exportados **a metade da
+velocidade**. Medindo a velocidade dos punhos nas mesmas palavras, o V-LIBRASIL
+saiu ~2,7× mais lento que a Incluir. Sem corrigir, duas coisas quebram:
+- **a janela da câmera**, que é a duração mediana dos sinais, ficaria esticada por
+  essa base;
+- **o `recortar_parado`**, que mede velocidade por frame, cortaria movimento lento
+  achando que é repouso.
+
+A correção fica na **extração**: para essa base, o `1_extrair.py` processa 1 de cada
+2 frames. A sequência volta à velocidade real com o mesmo fps, e o vídeo, o treino e
+a câmera continuam iguais. Corrigimos só o fator documentado (2×). Depois da correção
+sobra ~1,4×, e essa sobra varia de palavra para palavra, o que indica ritmo das
+pessoas. Diferença de ritmo entre pessoas é o que a reamostragem e a augmentation já
+absorvem.
+
+A lição vale para qualquer base nova: conferir velocidade e duração contra uma base
+conhecida antes de misturar.
+
 ### Base incluída: Incluir Tecnologia
 
 Os vídeos vêm do canal **Incluir Tecnologia** (dicionário de Libras no YouTube):

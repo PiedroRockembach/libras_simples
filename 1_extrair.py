@@ -27,9 +27,17 @@ import numpy as np
 from comum import VERSAO_CACHE, ExtratorLandmarks, baixar_modelos, empilhar
 
 EXTENSOES = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+SEP = "__"
+
+# Bases gravadas em CÂMERA LENTA: processa 1 de cada N frames. O V-LIBRASIL foi exportado a metade
+# da velocidade (dissertação, p. 57; medido em 2026-11-24: punhos ~2,7x mais lentos que na Incluir
+# nas mesmas palavras, o resto é ritmo da pessoa). Pulando 1 frame a cada 2, a sequência volta à
+# velocidade real com o mesmo fps do arquivo: duração, velocidades e o recortar_parado ficam
+# comparáveis às outras bases, sem mexer no vídeo nem no treino/câmera.
+PASSO_FRAMES = {"vlibrasil": 2}
 
 
-def extrair_video(caminho):
+def extrair_video(caminho, passo=1):
     """Devolve (sequência, fps, largura, altura); sequência = dict com pose, mãos, rosto, expressão."""
     cap = cv2.VideoCapture(caminho)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -38,12 +46,17 @@ def extrair_video(caminho):
     # Um extrator novo por vídeo: o rastreamento do vídeo anterior não deve
     # "vazar" para o primeiro frame do próximo.
     ext = ExtratorLandmarks()
-    frames = []
+    frames, i = [], 0
     while True:
-        ok, frame = cap.read()
+        ok = cap.grab()                      # grab sem decodificar: pular frame sai quase de graça
         if not ok:
             break
-        frames.append(ext.processar(frame, len(frames) * 1000.0 / fps))
+        if i % passo == 0:
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            frames.append(ext.processar(frame, i * 1000.0 / fps))
+        i += 1
     cap.release()
     ext.fechar()
     return empilhar(frames), fps, largura, altura
@@ -61,14 +74,16 @@ def versao_do_cache(caminho):
 def processar(origem, destino):
     """Roda num processo separado: extrai, salva e devolve um resumo (ou o erro)."""
     try:
-        seq, fps, w, h = extrair_video(origem)
+        passo = PASSO_FRAMES.get(os.path.basename(origem).split(SEP, 1)[0], 1)
+        seq, fps, w, h = extrair_video(origem, passo)
         if len(seq["pose"]) == 0:
             return origem, None, "não consegui ler o vídeo"
         # Escrita atômica: grava num temporário e renomeia. Se o processo morrer no
         # meio, não sobra um .npz pela metade que seria tratado como "já processado".
         tmp = destino + ".tmp"
         with open(tmp, "wb") as f:
-            np.savez_compressed(f, **seq, fps=fps, largura=w, altura=h, versao=VERSAO_CACHE)
+            np.savez_compressed(f, **seq, fps=fps, largura=w, altura=h, versao=VERSAO_CACHE,
+                                passo=passo)
         os.replace(tmp, destino)
         tem = lambda a: ~np.isnan(a.reshape(len(a), -1)[:, 0])   # noqa: E731
         taxa_mao = float(np.mean(tem(seq["mao_esq"]) | tem(seq["mao_dir"])))

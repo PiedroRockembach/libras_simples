@@ -42,6 +42,10 @@ UNIR = {
     "quarta feira": "quarta-feira", "quinta feira": "quinta-feira",
     "segunda feira": "segunda-feira", "sexta feira": "sexta-feira",
     "terça feira": "terça-feira", "cachorro quente": "cachorro-quente",
+    # Erros de grafia nas bases (2026-11-24, ao integrar o V-LIBRASIL). "secretária" (pessoa) e
+    # "secretaria" (lugar) NÃO entram: são palavras diferentes.
+    "côco": "coco", "melância": "melancia", "volêi": "vôlei",
+    "comemorar (celebrar)": "comemorar - celebrar",
 }
 
 # Nomes que o Windows reserva e não aceita como nome de pasta.
@@ -89,6 +93,8 @@ class Item:
     linha: dict = field(default_factory=dict)   # linha do manifesto original (colunas extras)
     excluir: bool = False            # True = vai para dados/excluidos/<fonte>/
     sha256: str = ""                 # se a base informar, permite conferir integridade
+    classe: str = ""                 # classe já decidida fora (ex.: pelo catálogo, que resolve a
+                                     # variante); vazio = normalizar_rotulo(rotulo_original)
 
 
 def nome_arquivo(fonte, id_, ext=".mp4"):
@@ -174,7 +180,7 @@ def organizar(fonte, itens, metadados=(), executar=False, verificar_sha=False,
             classe, destino = "", os.path.join(pasta_excl, it.arquivo_original)
             rel, status = "", "excluido"
         else:
-            classe = normalizar_rotulo(it.rotulo_original)
+            classe = normalizar_rotulo(it.classe or it.rotulo_original)
             ext = os.path.splitext(it.arquivo_original)[1].lower() or ".mp4"
             rel = f"{classe}/{nome_arquivo(fonte, it.id, ext)}"
             destino = os.path.join(PASTA_VIDEOS, classe, nome_arquivo(fonte, it.id, ext))
